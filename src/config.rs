@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const DEFAULT_CONFIG_FILE_PATH: &str = "giat_config";
 
@@ -6,6 +6,11 @@ const DEFAULT_CONFIG_FILE_PATH: &str = "giat_config";
 pub struct Config {
     input_file_path: PathBuf,
     config_file_path: PathBuf,
+}
+impl Config {
+    pub fn get_config_file_path(&self) -> &Path {
+        &self.config_file_path
+    }
 }
 
 pub struct ConfigBuilder {
