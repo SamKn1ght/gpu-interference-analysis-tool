@@ -1,9 +1,31 @@
+use log::warn;
+
 #[derive(serde::Deserialize, Debug)]
 pub struct CudaConfig {
     pub kernels: Vec<Kernel>,
     pub setup: SetupFunction,
     #[serde(default)]
     pub free: FreeFunction,
+    #[serde(default)]
+    pub streams: Vec<Stream>,
+}
+impl CudaConfig {
+    /// Validates the Config struct creating any implicitly defined structures
+    ///
+    /// This function must be called before use in templates to ensure validity of the structure
+    ///
+    /// Returns whether any warnings were emitted
+    pub fn validate(&mut self) -> bool {
+        let mut has_warning = false;
+        for kernel in &self.kernels {
+            if !self.streams.iter().any(|stream| stream.name == kernel.stream) {
+                self.streams.push(Stream { name: kernel.stream.clone() });
+                warn!("Created implicit stream : {}", &kernel.stream);
+                has_warning = true;
+            }
+        }
+        has_warning
+    }
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -21,6 +43,11 @@ impl Kernel {
     fn default_return_type() -> String {
         String::from("void")
     }
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub struct Stream {
+    pub name: String
 }
 
 #[derive(serde::Deserialize, Debug)]

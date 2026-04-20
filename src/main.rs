@@ -3,7 +3,10 @@ use clap::Parser;
 use log::{error, info};
 use std::{fs, io::BufWriter, path::PathBuf, process, sync::OnceLock};
 
-use crate::{config::{Config, ConfigBuilder}, cuda::CudaConfig};
+use crate::{
+    config::{Config, ConfigBuilder},
+    cuda::CudaConfig,
+};
 
 mod config;
 mod cuda;
@@ -64,10 +67,13 @@ fn main() {
     );
 
     let global_config = CONFIG.get().expect("Config should be intitialised");
-    let cuda_config: CudaConfig = {
+    let cuda_config = {
         let path = global_config.get_config_file_path();
         let content = fs::read_to_string(path).expect("Failed to read config file");
-        serde_yml::from_str(&content).expect("Failed to parse config file")
+        let mut config: CudaConfig =
+            serde_yml::from_str(&content).expect("Failed to parse config file");
+        let _ = config.validate();
+        config
     };
 
     let header_generator = HeaderTemplate {
