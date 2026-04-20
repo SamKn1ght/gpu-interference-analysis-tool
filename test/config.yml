@@ -1,0 +1,40 @@
+kernels:
+  - name: "vec_add"
+    blocks: 2
+    threads: 128
+    stream: "stream1"
+    args:
+      - type: "double*"
+        name: "a"
+      - type: "double*"
+        name: "b"
+      - type: "double*"
+        name: "c"
+      - type: "int"
+        name: "n"
+  - name: "vec_mul"
+    blocks: 4
+    threads: 128
+    stream: "stream2"
+    args:
+      - type: "double*"
+        name: "a"
+      - type: "double*"
+        name: "b"
+      - type: "double*"
+        name: "d"
+      - type: "int"
+        name: "n"
+setup:
+  name: "setup"
+  args:
+    - type: "double*"
+      name: "a"
+    - type: "double*"
+      name: "b"
+    - type: "double*"
+      name: "c"
+    - type: "double*"
+      name: "d"
+    - type: "int"
+      name: "n"

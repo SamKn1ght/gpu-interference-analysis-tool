@@ -1,0 +1,40 @@
+/*
+ * Generated header file
+ */
+
+#ifndef GENERATED_KERNELS_H
+#define GENERATED_KERNELS_H
+
+#include <cuda_runtime.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    {% for arg in config.setup.args %}
+    {% if arg.datatype.ends_with('*') %}
+    {{ arg.datatype }} d_{{ arg.name }};
+    {{ arg.datatype }} h_{{ arg.name }};
+    {% else %}
+    {{ arg.datatype }} {{ arg.name }};
+    {% endif %}
+    {% endfor %}
+} DataPointers;
+
+{% for kernel in config.kernels %}
+__global__ {{ kernel.return_type }} {{ kernel.name }}(
+    {%- for arg in kernel.args -%}
+    {{ arg.datatype }} {{ arg.name }}{% if !loop.last %}, {% endif %}
+    {%- endfor -%}
+);
+{% endfor %}
+
+{{ config.setup.return_type }} {{ config.setup.name }}(DataPointers* data);
+{{ config.free.return_type }} {{ config.free.name }}(DataPointers* data);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
