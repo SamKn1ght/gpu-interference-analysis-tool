@@ -1,4 +1,4 @@
-#include "../generated/generated_kernels.h"
+#include "generated_kernels.h"
 
 __global__ void vec_add(double* a, double* b, double* c, int size) {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
@@ -10,8 +10,9 @@ __global__ void vec_mul(double* a, double* b, double* d, int size) {
     if (i < size) { d[i] = a[i] * b[i]; }
 }
 
-void setup(DataPointers* data) {
+extern "C" {
 
+void setup(DataPointers* data) {
     data->n = 100000;
     int bytes = data->n * sizeof(double);
 
@@ -24,7 +25,7 @@ void setup(DataPointers* data) {
     cudaMalloc((void **)&data->d_c, bytes);
     cudaMalloc((void **)&data->d_d, bytes);
 
-    for (int i = 0.0; i < data->n; i++) {
+    for (int i = 0; i < data->n; i++) {
         data->h_a[i] = (double)(i + 1);
         data->h_b[i] = (double)(data->n - i);
         data->h_c[i] = 0.0;
@@ -46,4 +47,6 @@ void free_data(DataPointers* data) {
     cudaFree(data->d_b);
     cudaFree(data->d_c);
     cudaFree(data->d_d);
+}
+
 }
