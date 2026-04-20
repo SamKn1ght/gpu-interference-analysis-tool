@@ -1,17 +1,12 @@
 use askama::Template;
 use clap::Parser;
 use log::{error, info};
-use std::{
-    fs,
-    io::BufWriter,
-    path::{Path, PathBuf},
-    process,
-    sync::OnceLock,
-};
+use std::{fs, io::BufWriter, path::PathBuf, process, sync::OnceLock};
 
-use crate::config::{Config, ConfigBuilder};
+use crate::{config::{Config, ConfigBuilder}, cuda::CudaConfig};
 
 mod config;
+mod cuda;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
@@ -45,86 +40,13 @@ struct RunnerTemplate<'a> {
     header_path: &'a str,
 }
 
-#[derive(serde::Deserialize, Debug)]
-struct CudaConfig {
-    kernels: Vec<Kernel>,
-    setup: SetupFunction,
-    #[serde(default)]
-    free: FreeFunction,
-}
-
-#[derive(serde::Deserialize, Debug)]
-struct Kernel {
-    #[serde(default = "Kernel::default_return_type")]
-    return_type: String,
-    name: String,
-    #[serde(default)]
-    args: Vec<FunctionArg>,
-    blocks: u32,
-    threads: u32,
-    stream: String,
-}
-impl Kernel {
-    fn default_return_type() -> String {
-        String::from("void")
-    }
-}
-
-#[derive(serde::Deserialize, Debug)]
-struct SetupFunction {
-    #[serde(default = "SetupFunction::default_return_type")]
-    return_type: String,
-    #[serde(default = "SetupFunction::default_name")]
-    name: String,
-    #[serde(default)] // Default to no arguments
-    args: Vec<FunctionArg>,
-}
-impl SetupFunction {
-    fn default_return_type() -> String {
-        String::from("void")
-    }
-    fn default_name() -> String {
-        String::from("setup")
-    }
-}
-
-#[derive(serde::Deserialize, Debug)]
-struct FreeFunction {
-    #[serde(default = "FreeFunction::default_return_type")]
-    return_type: String,
-    #[serde(default = "FreeFunction::default_name")]
-    name: String,
-}
-
-impl Default for FreeFunction {
-    fn default() -> Self {
-        Self {
-            return_type: Self::default_return_type(),
-            name: Self::default_name(),
-        }
-    }
-}
-impl FreeFunction {
-    fn default_return_type() -> String {
-        String::from("void")
-    }
-    fn default_name() -> String {
-        String::from("free_data")
-    }
-}
-
-#[derive(serde::Deserialize, Debug)]
-struct FunctionArg {
-    name: String,
-    #[serde(rename = "type")]
-    datatype: String,
-}
-
 fn main() {
     // Check for loggin env var and default it if it is not present
     if let Err(_) = std::env::var("RUST_LOG") {
         // Single threaded space guarantees safety here
-        unsafe { std::env::set_var("RUST_LOG", "info"); }
+        unsafe {
+            std::env::set_var("RUST_LOG", "info");
+        }
     }
     env_logger::init();
 
