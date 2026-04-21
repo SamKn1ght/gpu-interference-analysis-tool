@@ -1,3 +1,6 @@
+frame_budget:
+  duration: "6ms"
+  method: "Busy"
 kernels:
   - name: "vec_add"
     blocks: 524288

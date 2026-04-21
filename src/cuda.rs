@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use log::warn;
 
 #[derive(serde::Deserialize, Debug)]
@@ -8,6 +10,8 @@ pub struct CudaConfig {
     pub free: FreeFunction,
     #[serde(default)]
     pub streams: Vec<Stream>,
+    #[serde(default)]
+    pub frame_budget: Option<Delay>,
 }
 impl CudaConfig {
     /// Validates the Config struct creating any implicitly defined structures
@@ -106,4 +110,17 @@ pub struct FunctionArg {
     pub name: String,
     #[serde(rename = "type")]
     pub datatype: String,
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub struct Delay {
+    #[serde(with = "humantime_serde")]
+    pub duration: Duration,
+    pub method: DelayMethod,
+}
+
+#[derive(serde::Deserialize, Debug, PartialEq, Eq)]
+pub enum DelayMethod {
+    Busy,
+    Sleep,
 }

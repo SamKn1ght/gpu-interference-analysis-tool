@@ -1,7 +1,14 @@
 #include "{{ header_path }}"
 #include <cuda_runtime.h>
+#include <stdint.h>
+#include <chrono>
 
 #define ITERS 50
+#define FRAME_BUDGET {% if config.frame_budget.is_some() -%}
+{{ config.frame_budget.as_ref().unwrap().duration.as_nanos() }}
+{%- else -%}
+UINT64_MAX
+{%- endif %}
 
 int main() {
 
@@ -19,6 +26,7 @@ int main() {
     {% endfor %}
 
     for (int i = 0; i < ITERS; i++) {
+        auto frame_start = std::chrono::high_resolution_clock::now();
         {% for i in 0..2 -%}
         {% let kernel = config.kernels[i] %}
         {{ kernel.name }}<<<{{ kernel.blocks }}, {{ kernel.threads }}, 0, {{ kernel.stream }}>>>(
@@ -27,6 +35,17 @@ int main() {
             {%- endfor -%}
         );
         {% endfor %}
+        auto end_time = std::chrono::high_resolution_clock::now();
+        {% if let Some(frame_budget) = config.frame_budget %}
+        {% if frame_budget.method == DelayMethod::Busy %}
+        while (std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - frame_start).count() < FRAME_BUDGET) {
+            end_time = std::chrono::high_resolution_clock::now();
+        }
+        {% else %}
+        auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(FRAME_BUDGET - end_time);
+        std::this_thread::sleep_for(remaining);
+        {% endif %}
+        {% endif %}
     }
 
     {% for stream in config.streams %}

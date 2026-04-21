@@ -5,7 +5,7 @@ use std::{fs, io::{BufWriter, Write}, path::PathBuf, process, sync::OnceLock};
 
 use crate::{
     config::{Config, ConfigBuilder},
-    cuda::CudaConfig,
+    cuda::{CudaConfig, DelayMethod},
 };
 
 mod config;
@@ -135,4 +135,6 @@ fn main() {
         }
         Err(e) => error!("Error in NVCC: {e}"),
     }
+
+    println!("{:?}", cuda_config);
 }
