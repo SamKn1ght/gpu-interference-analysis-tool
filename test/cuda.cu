@@ -2,7 +2,9 @@
 
 __global__ void vec_add(double* a, double* b, double* c, int size) {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
-    if (i < size) { c[i] = a[i] + b[i]; }
+    if (i < size) {
+        c[i] = sqrt(a[i] + b[i]);
+    }
 }
 
 __global__ void vec_mul(double* a, double* b, double* d, int size) {
@@ -13,7 +15,7 @@ __global__ void vec_mul(double* a, double* b, double* d, int size) {
 extern "C" {
 
 void setup(DataPointers* data) {
-    data->n = 100000;
+    data->n = (1 << 27) - 1;
     int bytes = data->n * sizeof(double);
 
     cudaHostAlloc((void**) &data->h_a, bytes, cudaHostAllocDefault);
@@ -32,10 +34,10 @@ void setup(DataPointers* data) {
         data->h_d[i] = 0.0;
     }
 
-    cudaMemcpy(data->d_a, data->h_a, bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(data->d_b, data->h_b, bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(data->d_c, data->h_c, bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(data->d_d, data->h_d, bytes, cudaMemcpyHostToDevice);
+    cudaMemcpyAsync(data->d_a, data->h_a, bytes, cudaMemcpyHostToDevice);
+    cudaMemcpyAsync(data->d_b, data->h_b, bytes, cudaMemcpyHostToDevice);
+    cudaMemcpyAsync(data->d_c, data->h_c, bytes, cudaMemcpyHostToDevice);
+    cudaMemcpyAsync(data->d_d, data->h_d, bytes, cudaMemcpyHostToDevice);
 }
 
 void free_data(DataPointers* data) {

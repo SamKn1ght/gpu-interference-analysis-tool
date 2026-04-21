@@ -9,7 +9,7 @@ int main() {
 
     {% for stream in config.streams %}
     cudaStream_t {{ stream.name }};
-    cudaStreamCreateWithFlags(&{{ stream.name }}, cudaStreamNonBlocking);
+    cudaStreamCreateWithPriority(&{{ stream.name }}, cudaStreamNonBlocking, {{ stream.priority.unwrap_or(0) }});
     {% endfor %}
 
     setup(&data);

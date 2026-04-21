@@ -18,8 +18,15 @@ impl CudaConfig {
     pub fn validate(&mut self) -> bool {
         let mut has_warning = false;
         for kernel in &self.kernels {
-            if !self.streams.iter().any(|stream| stream.name == kernel.stream) {
-                self.streams.push(Stream { name: kernel.stream.clone() });
+            if !self
+                .streams
+                .iter()
+                .any(|stream| stream.name == kernel.stream)
+            {
+                self.streams.push(Stream {
+                    name: kernel.stream.clone(),
+                    priority: None,
+                });
                 warn!("Created implicit stream : {}", &kernel.stream);
                 has_warning = true;
             }
@@ -47,7 +54,9 @@ impl Kernel {
 
 #[derive(serde::Deserialize, Debug)]
 pub struct Stream {
-    pub name: String
+    pub name: String,
+    #[serde(default)]
+    pub priority: Option<i32>,
 }
 
 #[derive(serde::Deserialize, Debug)]

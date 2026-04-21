@@ -1,7 +1,7 @@
 kernels:
   - name: "vec_add"
-    blocks: 2
-    threads: 128
+    blocks: 524288
+    threads: 256
     stream: "stream1"
     args:
       - type: "double*"
@@ -13,8 +13,8 @@ kernels:
       - type: "int"
         name: "n"
   - name: "vec_mul"
-    blocks: 4
-    threads: 128
+    blocks: 524288
+    threads: 256
     stream: "stream2"
     args:
       - type: "double*"
@@ -38,3 +38,8 @@ setup:
       name: "d"
     - type: "int"
       name: "n"
+streams:
+  - name: "stream2"
+    priority: -5
+  - name: "stream1"
+    priority: 0
