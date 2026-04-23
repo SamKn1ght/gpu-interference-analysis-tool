@@ -28,6 +28,11 @@ kernels:
         name: "d"
       - type: "int"
         name: "n"
+pipelines:
+  - name: "Addition Kernel"
+    kernel_names: ["vec_add"]
+  - name: "Multiply Kernel"
+    kernel_names: ["vec_mul"]
 setup:
   name: "setup"
   args:

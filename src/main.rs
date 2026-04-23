@@ -1,15 +1,22 @@
 use askama::Template;
 use clap::Parser;
 use log::{error, info};
-use std::{fs, io::{BufWriter, Write}, path::PathBuf, process, sync::OnceLock};
+use std::{
+    fs,
+    io::{BufWriter, Write},
+    path::PathBuf,
+    process,
+    sync::OnceLock,
+};
 
 use crate::{
     config::{Config, ConfigBuilder},
-    cuda::{CudaConfig, DelayMethod},
+    cuda::{CudaConfig, DelayMethod}, views::GpuPipelineView,
 };
 
 mod config;
 mod cuda;
+mod views;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
@@ -44,6 +51,7 @@ struct HeaderTemplate<'a> {
 struct RunnerTemplate<'a> {
     config: &'a CudaConfig,
     header_path: &'a str,
+    pipelines: Vec<GpuPipelineView<'a>>
 }
 
 fn main() {
@@ -99,6 +107,7 @@ fn main() {
     let runner_generator = RunnerTemplate {
         config: &cuda_config,
         header_path: canon_header_path.to_str().unwrap(),
+        pipelines: GpuPipelineView::collect_from_config(&cuda_config),
     };
     let runner_path = output_dir.to_path_buf().join(RUNNER_FILE_SUFFIX);
     let runner_file = fs::File::create(&runner_path).unwrap();
@@ -114,7 +123,11 @@ fn main() {
     nvcc_command
         .arg("-rdc=true")
         .arg("-I")
-        .arg(&output_dir.canonicalize().expect("Output directory should exist"))
+        .arg(
+            &output_dir
+                .canonicalize()
+                .expect("Output directory should exist"),
+        )
         .arg("-O3")
         .arg("-lineinfo")
         .arg(

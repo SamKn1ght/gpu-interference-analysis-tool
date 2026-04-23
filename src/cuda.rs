@@ -1,10 +1,12 @@
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
-use log::warn;
+use log::{error, warn};
 
 #[derive(serde::Deserialize, Debug)]
 pub struct CudaConfig {
     pub kernels: Vec<Kernel>,
+    #[serde(default)]
+    pub pipelines: Vec<GpuPipeline>,
     pub setup: SetupFunction,
     #[serde(default)]
     pub free: FreeFunction,
@@ -22,7 +24,8 @@ impl CudaConfig {
     ///
     /// Returns whether any warnings were emitted
     pub fn validate(&mut self) -> bool {
-        let mut has_warning = false;
+        let kernel_set = BTreeSet::from_iter(self.kernels.iter().map(|kernel| &kernel.name));
+        let mut has_error = false;
         for kernel in &self.kernels {
             if !self
                 .streams
@@ -34,17 +37,27 @@ impl CudaConfig {
                     priority: None,
                 });
                 warn!("Created implicit stream : {}", &kernel.stream);
-                has_warning = true;
             }
         }
-        has_warning
+        for pipeline in &self.pipelines {
+            for kernel_name in &pipeline.kernel_names {
+                if !kernel_set.contains(kernel_name) {
+                    error!(
+                        "Pipeline contains kernel ({}) not defined within the kernels section",
+                        kernel_name
+                    );
+                    has_error = true;
+                }
+            }
+        }
+        has_error
     }
     fn default_iterations() -> u32 {
         50
     }
 }
 
-#[derive(serde::Deserialize, Debug)]
+#[derive(serde::Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct Kernel {
     #[serde(default = "Kernel::default_return_type")]
     pub return_type: String,
@@ -59,6 +72,13 @@ impl Kernel {
     fn default_return_type() -> String {
         String::from("void")
     }
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub struct GpuPipeline {
+    pub name: String,
+    #[serde(default)]
+    pub kernel_names: Vec<String>,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -110,7 +130,7 @@ impl FreeFunction {
     }
 }
 
-#[derive(serde::Deserialize, Debug)]
+#[derive(serde::Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct FunctionArg {
     pub name: String,
     #[serde(rename = "type")]
