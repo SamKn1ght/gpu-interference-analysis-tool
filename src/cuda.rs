@@ -12,6 +12,8 @@ pub struct CudaConfig {
     pub streams: Vec<Stream>,
     #[serde(default)]
     pub frame_budget: Option<Delay>,
+    #[serde(default = "CudaConfig::default_iterations")]
+    pub iterations: u32,
 }
 impl CudaConfig {
     /// Validates the Config struct creating any implicitly defined structures
@@ -36,6 +38,9 @@ impl CudaConfig {
             }
         }
         has_warning
+    }
+    fn default_iterations() -> u32 {
+        50
     }
 }
 

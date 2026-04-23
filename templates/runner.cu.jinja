@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <chrono>
 
-#define ITERS 50
+#define ITERS {{ config.iterations }}
 #define FRAME_BUDGET {% if config.frame_budget.is_some() -%}
 {{ config.frame_budget.as_ref().unwrap().duration.as_nanos() }}
 {%- else -%}
