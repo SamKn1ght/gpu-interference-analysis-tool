@@ -12,14 +12,14 @@ extern "C" {
 #endif
 
 typedef struct {
-    {% for arg in config.setup.args %}
-    {% if arg.datatype.ends_with('*') %}
+    {% for arg in config.setup.args -%}
+    {%- if arg.datatype.ends_with('*') %}
     {{ arg.datatype }} d_{{ arg.name }};
     {{ arg.datatype }} h_{{ arg.name }};
     {% else %}
     {{ arg.datatype }} {{ arg.name }};
-    {% endif %}
-    {% endfor %}
+    {%- endif %}
+    {%- endfor %}
 } DataPointers;
 
 {% for kernel in config.kernels %}
