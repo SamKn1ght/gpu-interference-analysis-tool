@@ -1,0 +1,58 @@
+
+#include "{{ header_path }}"
+#include <cuda_runtime.h>
+#include <stdint.h>
+#include <chrono>
+
+#define ITERS {{ config.iterations }}
+#define FRAME_BUDGET {% if config.frame_budget.is_some() -%}
+{{ config.frame_budget.as_ref().unwrap().duration.as_nanos() }}
+{%- else -%}
+UINT64_MAX
+{%- endif %}
+
+int main() {
+
+    DataPointers data;
+
+    {% for stream in pair.streams %}
+    cudaStream_t {{ stream.name }};
+    cudaStreamCreateWithPriority(&{{ stream.name }}, cudaStreamNonBlocking, {{ stream.priority.unwrap_or(0) }});
+    {% endfor %}
+
+    setup(&data);
+
+    {% for stream in pair.streams %}
+    cudaStreamSynchronize({{ stream.name }});
+    {% endfor %}
+
+    for (int i = 0; i < ITERS; i++) {
+        auto frame_start = std::chrono::high_resolution_clock::now();
+        {% for kernel in pair.kernels -%}
+        {{ kernel.name }}<<<{{ kernel.blocks }}, {{ kernel.threads }}, 0, {{ kernel.stream }}>>>(
+            {%- for arg in kernel.args -%}
+            data.{% if arg.datatype.ends_with('*') %}d_{% endif %}{{ arg.name }}{% if !loop.last %}, {% endif %}
+            {%- endfor -%}
+        );
+        {% endfor %}
+        auto end_time = std::chrono::high_resolution_clock::now();
+        {% if let Some(frame_budget) = config.frame_budget %}
+        {% if frame_budget.method == DelayMethod::Busy %}
+        while (std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - frame_start).count() < FRAME_BUDGET) {
+            end_time = std::chrono::high_resolution_clock::now();
+        }
+        {% else %}
+        auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(FRAME_BUDGET - end_time);
+        std::this_thread::sleep_for(remaining);
+        {% endif %}
+        {% endif %}
+    }
+
+    {% for stream in pair.streams %}
+    cudaStreamSynchronize({{ stream.name }});
+    {% endfor %}
+
+    free_data(&data);
+
+    return 0;
+}

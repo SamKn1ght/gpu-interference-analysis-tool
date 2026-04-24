@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::cuda::{CudaConfig, Kernel};
+use crate::cuda::{CudaConfig, Kernel, Stream};
 
 pub struct GpuPipelineView<'a> {
     pub name: &'a str,
@@ -29,5 +29,45 @@ impl<'a> GpuPipelineView<'a> {
             })
         }
         pipelines
+    }
+}
+
+pub struct PairedKernelView<'a> {
+    pub kernels: [&'a Kernel; 2],
+    pub streams: [&'a Stream; 2],
+}
+impl<'a> PairedKernelView<'a> {
+    pub fn iter_unique_kernel_pairs(config: &'a CudaConfig) -> impl Iterator<Item = Self> {
+        let stream_map = Self::generate_stream_lookup_map(config);
+        Self::get_kernel_pairings(config)
+            .filter(|(a, b)| a != b)
+            .map(move |(a, b)| Self {
+                kernels: [a, b],
+                streams: [
+                    stream_map
+                        .get(a.stream.as_str())
+                        .expect("Stream should exist at this point"),
+                    stream_map
+                        .get(b.stream.as_str())
+                        .expect("Streams should exist at this point"),
+                ],
+            })
+    }
+    fn generate_stream_lookup_map(config: &'a CudaConfig) -> BTreeMap<&'a str, &'a Stream> {
+        config
+            .streams
+            .iter()
+            .map(|stream| (stream.name.as_str(), stream))
+            .collect::<BTreeMap<&str, &Stream>>()
+    }
+    /// Gets all pairings of kernels within a CudaConfig struct
+    fn get_kernel_pairings(
+        config: &'a CudaConfig,
+    ) -> impl Iterator<Item = (&'a Kernel, &'a Kernel)> {
+        config
+            .kernels
+            .iter()
+            .enumerate()
+            .flat_map(|(i, a)| config.kernels.iter().skip(i + 1).map(move |b| (a, b)))
     }
 }

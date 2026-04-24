@@ -1,5 +1,5 @@
 frame_budget:
-  duration: "6ms"
+  duration: "7900us"
   method: "Busy"
 kernels:
   - name: "vec_add"
@@ -28,6 +28,17 @@ kernels:
         name: "d"
       - type: "int"
         name: "n"
+  - name: "avg_h_blur"
+    blocks: 524288
+    threads: 256
+    stream: "stream3"
+    args:
+      - type: "double*"
+        name: "e"
+      - type: "double*"
+        name: "f"
+      - type: "int"
+        name: "n"
 pipelines:
   - name: "Addition Kernel"
     kernel_names: ["vec_add"]
@@ -44,6 +55,10 @@ setup:
       name: "c"
     - type: "double*"
       name: "d"
+    - type: "double*"
+      name: "e"
+    - type: "double*"
+      name: "f"
     - type: "int"
       name: "n"
 streams:

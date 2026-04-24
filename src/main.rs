@@ -11,7 +11,8 @@ use std::{
 
 use crate::{
     config::{Config, ConfigBuilder},
-    cuda::{CudaConfig, DelayMethod}, views::GpuPipelineView,
+    cuda::{CudaConfig, DelayMethod, Kernel},
+    views::{GpuPipelineView, PairedKernelView},
 };
 
 mod config;
@@ -51,7 +52,15 @@ struct HeaderTemplate<'a> {
 struct RunnerTemplate<'a> {
     config: &'a CudaConfig,
     header_path: &'a str,
-    pipelines: Vec<GpuPipelineView<'a>>
+    pipelines: Vec<GpuPipelineView<'a>>,
+}
+
+#[derive(Template)]
+#[template(path = "paired_runner.cu.jinja")]
+struct PairedRunner<'a> {
+    config: &'a CudaConfig,
+    header_path: &'a str,
+    pair: PairedKernelView<'a>,
 }
 
 fn main() {
@@ -94,6 +103,9 @@ fn main() {
     if !fs::exists(output_dir).unwrap_or(false) {
         let _ = fs::create_dir_all(output_dir);
     }
+
+    // Generate header for the full user implementation file
+
     let header_path = output_dir.to_path_buf().join(KERNEL_HEADER_SUFFIX);
     let header_file = fs::File::create(&header_path).unwrap();
     let mut writer = BufWriter::new(header_file);
@@ -104,50 +116,54 @@ fn main() {
         .expect("Header path should exist");
 
     let canon_header_path = header_path.canonicalize().unwrap();
-    let runner_generator = RunnerTemplate {
-        config: &cuda_config,
-        header_path: canon_header_path.to_str().unwrap(),
-        pipelines: GpuPipelineView::collect_from_config(&cuda_config),
-    };
+
+    // Generate runner files for pairings
+
     let runner_path = output_dir.to_path_buf().join(RUNNER_FILE_SUFFIX);
-    let runner_file = fs::File::create(&runner_path).unwrap();
-    let mut writer = BufWriter::new(runner_file);
-    let _ = runner_generator.write_into(&mut writer);
-    let _ = writer.flush();
-    let runner_path = runner_path
-        .canonicalize()
-        .expect("Runner path should exist");
-
     let binary_path = output_dir.to_path_buf().join("harness.bin");
-    let mut nvcc_command = process::Command::new("nvcc");
-    nvcc_command
-        .arg("-rdc=true")
-        .arg("-I")
-        .arg(
-            &output_dir
-                .canonicalize()
-                .expect("Output directory should exist"),
-        )
-        .arg("-O3")
-        .arg("-lineinfo")
-        .arg(
-            PathBuf::from(args.input_file_path)
-                .canonicalize()
-                .expect("User provided file path should exist"),
-        )
-        .arg(runner_path)
-        .arg("-o")
-        .arg(&binary_path);
-    match nvcc_command.output() {
-        Ok(out) => {
-            if out.status.success() {
-                info!("Compiled binary {}", binary_path.to_string_lossy())
-            } else {
-                error!("Error in NVCC: {}", String::from_utf8_lossy(&out.stderr));
-            }
-        }
-        Err(e) => error!("Error in NVCC: {e}"),
-    }
+    for pair in PairedKernelView::iter_unique_kernel_pairs(&cuda_config) {
+        let runner_generator = PairedRunner {
+            config: &cuda_config,
+            header_path: canon_header_path.to_str().unwrap(),
+            pair,
+        };
 
-    println!("{:?}", cuda_config);
+        let runner_file = fs::File::create(&runner_path).unwrap();
+        let mut writer = BufWriter::new(runner_file);
+        let _ = runner_generator.write_into(&mut writer);
+        let _ = writer.flush();
+        let runner_path = runner_path
+            .canonicalize()
+            .expect("Runner path should exist");
+
+        let mut nvcc_command = process::Command::new("nvcc");
+        nvcc_command
+            .arg("-rdc=true")
+            .arg("-I")
+            .arg(
+                &output_dir
+                    .canonicalize()
+                    .expect("Output directory should exist"),
+            )
+            .arg("-O3")
+            .arg("-lineinfo")
+            .arg(
+                PathBuf::from(&args.input_file_path)
+                    .canonicalize()
+                    .expect("User provided file path should exist"),
+            )
+            .arg(runner_path)
+            .arg("-o")
+            .arg(&binary_path);
+        match nvcc_command.output() {
+            Ok(out) => {
+                if out.status.success() {
+                    info!("Compiled binary {}", binary_path.to_string_lossy())
+                } else {
+                    error!("Error in NVCC: {}", String::from_utf8_lossy(&out.stderr));
+                }
+            }
+            Err(e) => error!("Error in NVCC: {e}"),
+        }
+    }
 }
