@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 const DEFAULT_CONFIG_FILE_PATH: &str = "giat_config";
-const DEFAULT_OUTPUT_DIR: &str = "generated";
+// const DEFAULT_OUTPUT_DIR: &str = "generated";
 
 #[derive(Debug)]
 pub struct Config {
@@ -42,7 +42,7 @@ impl ConfigBuilder {
                 .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILE_PATH)),
             output_dir: self
                 .output_dir
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT_DIR)),
+                .unwrap_or_else(|| PathBuf::from(Self::default_output_dir())),
         })
     }
 
@@ -53,5 +53,9 @@ impl ConfigBuilder {
     pub fn config_file_path(&mut self, path: impl Into<PathBuf>) -> &mut Self {
         self.config_file_path = Some(path.into());
         self
+    }
+
+    fn default_output_dir() -> String {
+        chrono::Local::now().format("results_%Y%m%d-%H%M%S").to_string()
     }
 }

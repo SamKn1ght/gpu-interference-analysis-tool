@@ -99,14 +99,14 @@ fn main() {
     let header_generator = HeaderTemplate {
         config: &cuda_config,
     };
-    let output_dir = global_config.get_output_dir();
-    if !fs::exists(output_dir).unwrap_or(false) {
-        let _ = fs::create_dir_all(output_dir);
+    let generated_dir = global_config.get_output_dir().to_path_buf().join("generated");
+    if !fs::exists(&generated_dir).unwrap_or(false) {
+        let _ = fs::create_dir_all(&generated_dir);
     }
 
     // Generate header for the full user implementation file
 
-    let header_path = output_dir.to_path_buf().join(KERNEL_HEADER_SUFFIX);
+    let header_path = generated_dir.to_path_buf().join(KERNEL_HEADER_SUFFIX);
     let header_file = fs::File::create(&header_path).unwrap();
     let mut writer = BufWriter::new(header_file);
     let _ = header_generator.write_into(&mut writer);
@@ -119,8 +119,8 @@ fn main() {
 
     // Generate runner files for pairings
 
-    let runner_path = output_dir.to_path_buf().join(RUNNER_FILE_SUFFIX);
-    let binary_path = output_dir.to_path_buf().join("harness.bin");
+    let runner_path = generated_dir.to_path_buf().join(RUNNER_FILE_SUFFIX);
+    let binary_path = generated_dir.to_path_buf().join("harness.bin");
     for pair in PairedKernelView::iter_unique_kernel_pairs(&cuda_config) {
         let runner_generator = PairedRunner {
             config: &cuda_config,
@@ -141,7 +141,7 @@ fn main() {
             .arg("-rdc=true")
             .arg("-I")
             .arg(
-                &output_dir
+                &generated_dir
                     .canonicalize()
                     .expect("Output directory should exist"),
             )
