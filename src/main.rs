@@ -11,7 +11,7 @@ use std::{
 
 use crate::{
     config::{Config, ConfigBuilder},
-    cuda::{CudaConfig, DelayMethod, Kernel},
+    cuda::{CudaConfig, DelayMethod},
     views::{GpuPipelineView, PairedKernelView},
 };
 
@@ -60,7 +60,7 @@ struct RunnerTemplate<'a> {
 struct PairedRunner<'a> {
     config: &'a CudaConfig,
     header_path: &'a str,
-    pair: PairedKernelView<'a>,
+    pair: &'a PairedKernelView<'a>,
 }
 
 fn main() {
@@ -99,7 +99,10 @@ fn main() {
     let header_generator = HeaderTemplate {
         config: &cuda_config,
     };
-    let generated_dir = global_config.get_output_dir().to_path_buf().join("generated");
+    let generated_dir = global_config
+        .get_output_dir()
+        .to_path_buf()
+        .join("generated");
     if !fs::exists(&generated_dir).unwrap_or(false) {
         let _ = fs::create_dir_all(&generated_dir);
     }
@@ -122,10 +125,11 @@ fn main() {
     let runner_path = generated_dir.to_path_buf().join(RUNNER_FILE_SUFFIX);
     let binary_path = generated_dir.to_path_buf().join("harness.bin");
     for pair in PairedKernelView::iter_unique_kernel_pairs(&cuda_config) {
+        // Generate files
         let runner_generator = PairedRunner {
             config: &cuda_config,
             header_path: canon_header_path.to_str().unwrap(),
-            pair,
+            pair: &pair,
         };
 
         let runner_file = fs::File::create(&runner_path).unwrap();
@@ -135,6 +139,8 @@ fn main() {
         let runner_path = runner_path
             .canonicalize()
             .expect("Runner path should exist");
+
+        // Build with NVCC
 
         let mut nvcc_command = process::Command::new("nvcc");
         nvcc_command
@@ -155,6 +161,7 @@ fn main() {
             .arg(runner_path)
             .arg("-o")
             .arg(&binary_path);
+
         match nvcc_command.output() {
             Ok(out) => {
                 if out.status.success() {
@@ -165,5 +172,31 @@ fn main() {
             }
             Err(e) => error!("Error in NVCC: {e}"),
         }
+
+        // Run nsys command on generated binary
+
+        let nsys_output_file = global_config.get_output_dir().to_path_buf().join(format!("{}", pair.to_pair_name()));
+        let mut nsys_command = process::Command::new("nsys");
+        nsys_command
+            .arg("profile")
+            .arg("--stats=true")
+            .arg("-o")
+            .arg(format!(
+                "{}",
+                nsys_output_file.to_string_lossy()
+            ))
+            .arg(format!("{}", binary_path.to_string_lossy()));
+
+        match nsys_command.output() {
+            Ok(out) => {
+                if out.status.success() {
+                    info!("Nsys completed for {}", pair.to_pair_name());
+                } else {
+                    error!("Error from NSYS: {}", String::from_utf8_lossy(&out.stderr));
+                }
+            }
+            Err(e) => error!("Error running NSYS: {e}"),
+        }
+
     }
 }

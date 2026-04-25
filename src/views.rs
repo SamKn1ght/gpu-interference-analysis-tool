@@ -37,6 +37,9 @@ pub struct PairedKernelView<'a> {
     pub streams: [&'a Stream; 2],
 }
 impl<'a> PairedKernelView<'a> {
+    pub fn to_pair_name(&self) -> String {
+        format!("{}-{}", self.kernels[0].name, self.kernels[1].name)
+    }
     pub fn iter_unique_kernel_pairs(config: &'a CudaConfig) -> impl Iterator<Item = Self> {
         let stream_map = Self::generate_stream_lookup_map(config);
         Self::get_kernel_pairings(config)
