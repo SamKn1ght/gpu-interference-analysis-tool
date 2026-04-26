@@ -21,6 +21,33 @@ __global__ void avg_h_blur(double* e, double* f, int size) {
     }
 }
 
+__global__ void strided_reduce_sum(double* g, double* g_sum, int size) {
+    extern __shared__ double thread_sum[]; // Expected threads per block * sizeof(double)
+
+    int thread_id = threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+
+    double local_sum = 0.0;
+
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < size; i += stride) {
+        local_sum += g[i];
+    }
+
+    thread_sum[thread_id] = local_sum;
+    __syncthreads();
+
+    for (int i = blockDim.x / 2; i > 0; i /= 2) {
+        if (thread_id < i) {
+            thread_sum[i] += thread_sum[thread_id + i];
+        }
+        __syncthreads();
+    }
+
+    if (thread_id == 0) {
+        atomicAdd(g_sum, thread_sum[0]);
+    }
+}
+
 extern "C" {
 
 void setup(DataPointers* data) {
@@ -33,12 +60,16 @@ void setup(DataPointers* data) {
     cudaHostAlloc((void**) &data->h_d, bytes, cudaHostAllocDefault);
     cudaHostAlloc((void**) &data->h_e, bytes, cudaHostAllocDefault);
     cudaHostAlloc((void**) &data->h_f, bytes, cudaHostAllocDefault);
+    cudaHostAlloc((void**) &data->h_g, bytes, cudaHostAllocDefault);
+    cudaHostAlloc((void**) &data->h_g_sum, sizeof(double), cudaHostAllocDefault);
     cudaMalloc((void **)&data->d_a, bytes);
     cudaMalloc((void **)&data->d_b, bytes);
     cudaMalloc((void **)&data->d_c, bytes);
     cudaMalloc((void **)&data->d_d, bytes);
     cudaMalloc((void **)&data->d_e, bytes);
     cudaMalloc((void **)&data->d_f, bytes);
+    cudaMalloc((void **)&data->d_g, bytes);
+    cudaMalloc((void **)&data->d_g_sum, sizeof(double));
 
     for (int i = 0; i < data->n; i++) {
         data->h_a[i] = (double)(i + 1);
@@ -47,7 +78,9 @@ void setup(DataPointers* data) {
         data->h_d[i] = 0.0;
         data->h_e[i] = (double)(2 * i);
         data->h_f[i] = 0.0;
+        data->h_g[i] = 1.0;
     }
+    data->h_g_sum[0] = 0.0;
 
     cudaMemcpyAsync(data->d_a, data->h_a, bytes, cudaMemcpyHostToDevice);
     cudaMemcpyAsync(data->d_b, data->h_b, bytes, cudaMemcpyHostToDevice);
@@ -55,6 +88,8 @@ void setup(DataPointers* data) {
     cudaMemcpyAsync(data->d_d, data->h_d, bytes, cudaMemcpyHostToDevice);
     cudaMemcpyAsync(data->d_e, data->h_e, bytes, cudaMemcpyHostToDevice);
     cudaMemcpyAsync(data->d_f, data->h_f, bytes, cudaMemcpyHostToDevice);
+    cudaMemcpyAsync(data->d_g, data->h_g, bytes, cudaMemcpyHostToDevice);
+    cudaMemcpyAsync(data->d_g_sum, data->h_g_sum, sizeof(double), cudaMemcpyHostToDevice);
 }
 
 void free_data(DataPointers* data) {
@@ -64,12 +99,16 @@ void free_data(DataPointers* data) {
     cudaFreeHost(data->h_d);
     cudaFreeHost(data->h_e);
     cudaFreeHost(data->h_f);
+    cudaFreeHost(data->h_g);
+    cudaFreeHost(data->h_g_sum);
     cudaFree(data->d_a);
     cudaFree(data->d_b);
     cudaFree(data->d_c);
     cudaFree(data->d_d);
     cudaFree(data->d_e);
     cudaFree(data->d_f);
+    cudaFree(data->d_g);
+    cudaFree(data->d_g_sum);
 }
 
 }

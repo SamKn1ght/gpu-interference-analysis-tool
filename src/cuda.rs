@@ -66,11 +66,16 @@ pub struct Kernel {
     pub args: Vec<FunctionArg>,
     pub blocks: u32,
     pub threads: u32,
+    #[serde(default = "Kernel::default_shared_memory_bytes")]
+    pub shared_memory_bytes: u32,
     pub stream: String,
 }
 impl Kernel {
     fn default_return_type() -> String {
         String::from("void")
+    }
+    fn default_shared_memory_bytes() -> u32 {
+        0
     }
 }
 

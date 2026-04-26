@@ -39,6 +39,18 @@ kernels:
         name: "f"
       - type: "int"
         name: "n"
+  - name: "strided_reduce_sum"
+    blocks: 40
+    threads: 256
+    shared_memory_bytes: 2048
+    stream: "stream4"
+    args:
+      - type: "double*"
+        name: "g"
+      - type: "double*"
+        name: "g_sum"
+      - type: "int"
+        name: "n"
 pipelines:
   - name: "Addition Kernel"
     kernel_names: ["vec_add"]
@@ -59,6 +71,10 @@ setup:
       name: "e"
     - type: "double*"
       name: "f"
+    - type: "double*"
+      name: "g"
+    - type: "double*"
+      name: "g_sum"
     - type: "int"
       name: "n"
 streams:

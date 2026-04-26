@@ -29,7 +29,7 @@ int main() {
     for (int i = 0; i < ITERS; i++) {
         auto frame_start = std::chrono::high_resolution_clock::now();
         {% for kernel in pair.kernels -%}
-        {{ kernel.name }}<<<{{ kernel.blocks }}, {{ kernel.threads }}, 0, {{ kernel.stream }}>>>(
+        {{ kernel.name }}<<<{{ kernel.blocks }}, {{ kernel.threads }}, {{ kernel.shared_memory_bytes }}, {{ kernel.stream }}>>>(
             {%- for arg in kernel.args -%}
             data.{% if arg.datatype.ends_with('*') %}d_{% endif %}{{ arg.name }}{% if !loop.last %}, {% endif %}
             {%- endfor -%}
