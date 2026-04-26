@@ -175,16 +175,16 @@ fn main() {
 
         // Run nsys command on generated binary
 
-        let nsys_output_file = global_config.get_output_dir().to_path_buf().join(format!("{}", pair.to_pair_name()));
+        let nsys_output_file = global_config
+            .get_output_dir()
+            .to_path_buf()
+            .join(format!("{}", pair.to_pair_name()));
         let mut nsys_command = process::Command::new("nsys");
         nsys_command
             .arg("profile")
-            .arg("--stats=true")
+            // .arg("--stats=true")
             .arg("-o")
-            .arg(format!(
-                "{}",
-                nsys_output_file.to_string_lossy()
-            ))
+            .arg(format!("{}", nsys_output_file.to_string_lossy()))
             .arg(format!("{}", binary_path.to_string_lossy()));
 
         match nsys_command.output() {
@@ -198,5 +198,33 @@ fn main() {
             Err(e) => error!("Error running NSYS: {e}"),
         }
 
+        let csv_output_file = global_config
+            .get_output_dir()
+            .to_path_buf()
+            .join(format!("{}.csv", pair.to_pair_name()));
+        let mut nsys_stats_command = process::Command::new("nsys");
+        nsys_stats_command
+            .arg("stats")
+            .arg("--report")
+            .arg("cuda_gpu_trace,cuda_api_trace")
+            .arg("--format")
+            .arg("csv")
+            .arg("--output")
+            .arg(format!("{}", csv_output_file.to_string_lossy()))
+            .arg(format!("{}.nsys-rep", nsys_output_file.to_string_lossy()));
+
+        match nsys_stats_command.output() {
+            Ok(out) => {
+                if out.status.success() {
+                    info!("Nsys stats completed for {}", pair.to_pair_name());
+                } else {
+                    error!(
+                        "Error from NSYS stats: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+            }
+            Err(e) => error!("Error running NSYS stats: {e}"),
+        }
     }
 }
