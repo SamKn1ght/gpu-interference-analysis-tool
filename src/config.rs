@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 const DEFAULT_CONFIG_FILE_PATH: &str = "giat_config";
-// const DEFAULT_OUTPUT_DIR: &str = "generated";
 
 #[derive(Debug)]
 pub struct Config {
@@ -15,6 +14,9 @@ impl Config {
     }
     pub fn get_output_dir(&self) -> &Path {
         &self.output_dir
+    }
+    pub fn new_output_file(&self, path: impl AsRef<Path>) -> PathBuf {
+        self.output_dir.clone().join(path)
     }
 }
 

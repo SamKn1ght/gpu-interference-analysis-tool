@@ -99,10 +99,7 @@ fn main() {
     let header_generator = HeaderTemplate {
         config: &cuda_config,
     };
-    let generated_dir = global_config
-        .get_output_dir()
-        .to_path_buf()
-        .join("generated");
+    let generated_dir = global_config.new_output_file("generated");
     if !fs::exists(&generated_dir).unwrap_or(false) {
         let _ = fs::create_dir_all(&generated_dir);
     }
@@ -122,8 +119,6 @@ fn main() {
 
     // Generate runner files for pairings
 
-    let runner_path = generated_dir.to_path_buf().join(RUNNER_FILE_SUFFIX);
-    let binary_path = generated_dir.to_path_buf().join("harness.bin");
     for pair in PairedKernelView::iter_unique_kernel_pairs(&cuda_config) {
         // Generate files
         let runner_generator = PairedRunner {
@@ -131,6 +126,13 @@ fn main() {
             header_path: canon_header_path.to_str().unwrap(),
             pair: &pair,
         };
+
+        let pair_dir = global_config.new_output_file(pair.to_pair_name());
+        let _ = fs::create_dir_all(&pair_dir);
+        let pair_generated_dir = pair_dir.join("generated");
+        let _ = fs::create_dir_all(&pair_generated_dir);
+        let runner_path = pair_generated_dir.to_path_buf().join(RUNNER_FILE_SUFFIX);
+        let binary_path = pair_generated_dir.to_path_buf().join("harness.bin");
 
         let runner_file = fs::File::create(&runner_path).unwrap();
         let mut writer = BufWriter::new(runner_file);
@@ -175,14 +177,10 @@ fn main() {
 
         // Run nsys command on generated binary
 
-        let nsys_output_file = global_config
-            .get_output_dir()
-            .to_path_buf()
-            .join(format!("{}", pair.to_pair_name()));
+        let nsys_output_file = pair_dir.join("report");
         let mut nsys_command = process::Command::new("nsys");
         nsys_command
             .arg("profile")
-            // .arg("--stats=true")
             .arg("-o")
             .arg(format!("{}", nsys_output_file.to_string_lossy()))
             .arg(format!("{}", binary_path.to_string_lossy()));
@@ -198,10 +196,6 @@ fn main() {
             Err(e) => error!("Error running NSYS: {e}"),
         }
 
-        let csv_output_file = global_config
-            .get_output_dir()
-            .to_path_buf()
-            .join(format!("{}.csv", pair.to_pair_name()));
         let mut nsys_stats_command = process::Command::new("nsys");
         nsys_stats_command
             .arg("stats")
@@ -210,7 +204,7 @@ fn main() {
             .arg("--format")
             .arg("csv")
             .arg("--output")
-            .arg(format!("{}", csv_output_file.to_string_lossy()))
+            .arg(format!("{}", nsys_output_file.to_string_lossy()))
             .arg(format!("{}.nsys-rep", nsys_output_file.to_string_lossy()));
 
         match nsys_stats_command.output() {
