@@ -1,6 +1,7 @@
 use askama::Template;
 use clap::Parser;
 use log::{error, info};
+use polars::{prelude::*, series::Series};
 use std::{
     fs,
     io::{BufWriter, Write},
@@ -12,11 +13,16 @@ use std::{
 use crate::{
     config::{Config, ConfigBuilder},
     cuda::{CudaConfig, DelayMethod},
+    data::{
+        CudaApiTrace, CudaGpuTrace, collect_all_array, lazy_load_api_trace_dataframe,
+        lazy_load_gpu_trace_dataframe,
+    },
     views::{GpuPipelineView, PairedKernelView},
 };
 
 mod config;
 mod cuda;
+mod data;
 mod views;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -220,5 +226,131 @@ fn main() {
             }
             Err(e) => error!("Error running NSYS stats: {e}"),
         }
+
+        let api_trace_file = nsys_output_file.with_file_name(format!(
+            "{}_cuda_api_trace.csv",
+            nsys_output_file
+                .file_name()
+                .and_then(|s| s.to_str())
+                .expect("Nsys output file should have some filename component")
+        ));
+        let gpu_trace_file = nsys_output_file.with_file_name(format!(
+            "{}_cuda_gpu_trace.csv",
+            nsys_output_file
+                .file_name()
+                .and_then(|s| s.to_str())
+                .expect("Nsys output file should have some filename component")
+        ));
+
+        let calc_start = std::time::Instant::now();
+
+        let api_data = lazy_load_api_trace_dataframe(&api_trace_file).unwrap();
+        let gpu_data = lazy_load_gpu_trace_dataframe(&gpu_trace_file).unwrap();
+
+        let kernel_names_series = Series::new("Kernel Names".into(), pair.get_kernel_names());
+        let user_kernels_filtered = gpu_data
+            .clone()
+            .filter(col(CudaGpuTrace::NAME).is_in(lit(kernel_names_series).implode(), false));
+        let final_executions_data = user_kernels_filtered
+            .clone()
+            .group_by([col(CudaGpuTrace::NAME)])
+            .agg([col(CudaGpuTrace::END).max().alias("Max End")]);
+
+        // Extract the last kernel execution timestamps
+        let kernel_a_last_execution_row = final_executions_data
+            .clone()
+            .filter(col(CudaGpuTrace::NAME).eq(lit(pair.get_kernel_names()[0])));
+        let kernel_b_last_execution_row = final_executions_data
+            .clone()
+            .filter(col(CudaGpuTrace::NAME).eq(lit(pair.get_kernel_names()[1])));
+        let last_executions = LazyFrame::collect_all_with_engine(
+            vec![
+                kernel_a_last_execution_row.logical_plan,
+                kernel_b_last_execution_row.logical_plan,
+            ],
+            Engine::Auto,
+            OptFlags::default(),
+        )
+        .unwrap();
+        let kernel_a_last_end = lit(last_executions[0]
+            .column("Max End")
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .try_extract::<i64>()
+            .unwrap())
+        .cast(DataType::Duration(TimeUnit::Nanoseconds));
+        let kernel_b_last_end = lit(last_executions[1]
+            .column("Max End")
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .try_extract::<i64>()
+            .unwrap())
+        .cast(DataType::Duration(TimeUnit::Nanoseconds));
+
+        let overlapping_kernel_condition = col(CudaGpuTrace::NAME)
+            .cast(DataType::String)
+            .eq(lit(pair.get_kernel_names()[0]))
+            .and(col(CudaGpuTrace::START).lt(kernel_b_last_end))
+            .or(col(CudaGpuTrace::NAME)
+                .cast(DataType::String)
+                .eq(lit(pair.get_kernel_names()[1]))
+                .and(col(CudaGpuTrace::START).lt(kernel_a_last_end)));
+        let concurrent_user_kernels = user_kernels_filtered
+            .clone()
+            .filter(overlapping_kernel_condition.clone());
+        let kernel_count_summary = user_kernels_filtered
+            .clone()
+            .group_by([col(CudaGpuTrace::NAME)])
+            .agg([
+                len().alias("Total Count"),
+                overlapping_kernel_condition
+                    .clone()
+                    .sum()
+                    .alias("Overlapping Kernels"),
+            ])
+            .with_columns([
+                (col("Total Count") - col("Overlapping Kernels")).alias("Excluded Kernels")
+            ]);
+
+        let queue_overhead_data = api_data
+            .clone()
+            .join(
+                gpu_data.clone(),
+                [col(CudaApiTrace::CORR_ID)],
+                [col(CudaGpuTrace::CORR_ID)],
+                JoinArgs::new(JoinType::Inner),
+            )
+            .with_column((col("Start (ns)_right") - col("Start (ns)")).alias(LAUNCH_LATENCY_STR))
+            .select([
+                col("Name").alias("Api Name"),
+                col("Name_right").alias("Gpu Name"),
+                col(CudaApiTrace::CORR_ID),
+                col(LAUNCH_LATENCY_STR),
+            ]);
+
+        let [
+            final_executions_data,
+            queue_overhead_data,
+            concurrent_user_kernels,
+            kernel_count_summary,
+        ] = collect_all_array([
+            final_executions_data,
+            queue_overhead_data,
+            concurrent_user_kernels,
+            kernel_count_summary,
+        ])
+        .unwrap();
+
+        let calc_end = std::time::Instant::now();
+
+        println!("Queue Launch Overhead: {}", queue_overhead_data.head(Some(10)));
+        // println!("{}", final_executions_data);
+        println!("Concurrent kernel [Head 5]: {}", concurrent_user_kernels.head(Some(5)));
+        println!("Kernel Inc/Ex Count: {}", kernel_count_summary);
+        println!("Polars calculations took {:#?}", calc_end - calc_start);
     }
 }
+
+const LAUNCH_LATENCY_STR: &str = "Launch Latency (ns)";
