@@ -5,17 +5,17 @@ use polars::{prelude::*, series::Series};
 use std::{
     fs,
     io::{BufWriter, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
     sync::OnceLock,
 };
 
 use crate::{
     config::{Config, ConfigBuilder},
-    cuda::{CudaConfig, DelayMethod},
+    cuda::{CudaConfig, DelayMethod, Kernel, Stream},
     data::{
-        CudaApiTrace, CudaGpuTrace, collect_all_array, lazy_load_api_trace_dataframe,
-        lazy_load_gpu_trace_dataframe,
+        CudaApiTrace, CudaGpuTrace, collect_all_array, get_gpu_duration_summary,
+        lazy_load_api_trace_dataframe, lazy_load_gpu_trace_dataframe,
     },
     views::{GpuPipelineView, PairedKernelView},
 };
@@ -53,13 +53,17 @@ struct HeaderTemplate<'a> {
     config: &'a CudaConfig,
 }
 
+trait RunnerTemplate {}
+
 #[derive(Template)]
-#[template(path = "runner.cu.jinja")]
-struct RunnerTemplate<'a> {
+#[template(path = "single_runner.cu.jinja")]
+struct SingleRunner<'a> {
     config: &'a CudaConfig,
     header_path: &'a str,
-    pipelines: Vec<GpuPipelineView<'a>>,
+    kernel: &'a Kernel,
+    stream: &'a Stream,
 }
+impl<'a> RunnerTemplate for SingleRunner<'a> {}
 
 #[derive(Template)]
 #[template(path = "paired_runner.cu.jinja")]
@@ -67,6 +71,128 @@ struct PairedRunner<'a> {
     config: &'a CudaConfig,
     header_path: &'a str,
     pair: &'a PairedKernelView<'a>,
+}
+impl<'a> RunnerTemplate for PairedRunner<'a> {}
+
+#[inline(never)]
+fn compile_runner<G>(
+    generator: G,
+    root_path: &Path,
+    header_dir: &Path,
+    user_file_path: &Path,
+) -> PathBuf
+where
+    G: Template + RunnerTemplate,
+{
+    let _ = fs::create_dir_all(&root_path);
+    let generated_dir = root_path.join("generated");
+    let _ = fs::create_dir_all(&generated_dir);
+    let runner_path = generated_dir.join(RUNNER_FILE_SUFFIX);
+    let binary_path = generated_dir.join("harness.bin");
+
+    let runner_file = fs::File::create(&runner_path).unwrap();
+    let mut writer = BufWriter::new(runner_file);
+    let _ = Template::write_into(&generator, &mut writer);
+    let _ = writer.flush();
+    let runner_path = runner_path
+        .canonicalize()
+        .expect("Runner path should exist");
+
+    let mut nvcc_command = process::Command::new("nvcc");
+    nvcc_command
+        .arg("-rdc=true")
+        .arg("-I")
+        .arg(
+            &header_dir
+                .canonicalize()
+                .expect("Output directory should exist"),
+        )
+        .arg("-O3")
+        .arg("-lineinfo")
+        .arg(
+            user_file_path
+                .to_path_buf()
+                .canonicalize()
+                .expect("User provided file path should exist"),
+        )
+        .arg(runner_path)
+        .arg("-o")
+        .arg(&binary_path);
+
+    match nvcc_command.output() {
+        Ok(out) => {
+            if out.status.success() {
+                info!("Compiled binary {}", binary_path.to_string_lossy())
+            } else {
+                error!("Error in NVCC: {}", String::from_utf8_lossy(&out.stderr));
+            }
+        }
+        Err(e) => error!("Error in NVCC: {e}"),
+    }
+
+    binary_path
+}
+#[inline(never)]
+fn run_nsys(binary_path: &Path, output_file: &Path, trial_name: &str) {
+    let mut nsys_command = process::Command::new("nsys");
+    nsys_command
+        .arg("profile")
+        .arg("-o")
+        .arg(format!("{}", output_file.to_string_lossy()))
+        .arg(format!("{}", binary_path.to_string_lossy()));
+
+    match nsys_command.output() {
+        Ok(out) => {
+            if out.status.success() {
+                info!("Nsys completed for {}", trial_name);
+            } else {
+                error!("Error from NSYS: {}", String::from_utf8_lossy(&out.stderr));
+            }
+        }
+        Err(e) => error!("Error running NSYS: {e}"),
+    }
+}
+fn get_nsys_trace_paths(nsys_report_file: &Path, trial_name: &str) -> (PathBuf, PathBuf) {
+    let mut nsys_stats_command = process::Command::new("nsys");
+    nsys_stats_command
+        .arg("stats")
+        .arg("--report")
+        .arg("cuda_gpu_trace,cuda_api_trace")
+        .arg("--format")
+        .arg("csv")
+        .arg("--output")
+        .arg(format!("{}", nsys_report_file.to_string_lossy()))
+        .arg(format!("{}.nsys-rep", nsys_report_file.to_string_lossy()));
+
+    match nsys_stats_command.output() {
+        Ok(out) => {
+            if out.status.success() {
+                info!("Nsys stats completed for {}", trial_name);
+            } else {
+                error!(
+                    "Error from NSYS stats: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+        }
+        Err(e) => error!("Error running NSYS stats: {e}"),
+    }
+
+    let api_trace_file = nsys_report_file.with_file_name(format!(
+        "{}_cuda_api_trace.csv",
+        nsys_report_file
+            .file_name()
+            .and_then(|s| s.to_str())
+            .expect("Nsys output file should have some filename component")
+    ));
+    let gpu_trace_file = nsys_report_file.with_file_name(format!(
+        "{}_cuda_gpu_trace.csv",
+        nsys_report_file
+            .file_name()
+            .and_then(|s| s.to_str())
+            .expect("Nsys output file should have some filename component")
+    ));
+    (api_trace_file, gpu_trace_file)
 }
 
 fn main() {
@@ -122,6 +248,43 @@ fn main() {
         .expect("Header path should exist");
 
     let canon_header_path = header_path.canonicalize().unwrap();
+    let user_input_file = PathBuf::from(&args.input_file_path);
+
+    // Generate baseline data
+
+    let baseline_path = global_config.new_output_file("baseline");
+    let mut duration_summary_rows = Vec::with_capacity(cuda_config.kernels.len());
+    for kernel in &cuda_config.kernels {
+        let runner_generator = SingleRunner {
+            config: &cuda_config,
+            header_path: header_path.to_str().unwrap(),
+            kernel,
+            stream: kernel.get_stream(&cuda_config).unwrap(),
+        };
+        let single_dir = baseline_path.join(&kernel.name);
+        let binary_path = compile_runner(
+            runner_generator,
+            &single_dir,
+            &generated_dir,
+            &user_input_file,
+        );
+
+        let nsys_output_file = single_dir.join("report");
+        run_nsys(&binary_path, &nsys_output_file, &kernel.name);
+        let (api_trace_file, gpu_trace_file) =
+            get_nsys_trace_paths(&nsys_output_file, &kernel.name);
+
+        let gpu_data = lazy_load_gpu_trace_dataframe(&gpu_trace_file).unwrap();
+        let single_execution_duration_stats = gpu_data
+            .clone()
+            .filter(col(CudaGpuTrace::NAME).eq(lit(kernel.name.clone())));
+        duration_summary_rows.push(get_gpu_duration_summary(single_execution_duration_stats));
+    }
+    let duration_summaries = concat(&duration_summary_rows, UnionArgs::default()).unwrap();
+    println!(
+        "Duration Summary: {}",
+        duration_summaries.collect().unwrap()
+    );
 
     // Generate runner files for pairings
 
@@ -134,113 +297,19 @@ fn main() {
         };
 
         let pair_dir = global_config.new_output_file(pair.to_pair_name());
-        let _ = fs::create_dir_all(&pair_dir);
-        let pair_generated_dir = pair_dir.join("generated");
-        let _ = fs::create_dir_all(&pair_generated_dir);
-        let runner_path = pair_generated_dir.to_path_buf().join(RUNNER_FILE_SUFFIX);
-        let binary_path = pair_generated_dir.to_path_buf().join("harness.bin");
-
-        let runner_file = fs::File::create(&runner_path).unwrap();
-        let mut writer = BufWriter::new(runner_file);
-        let _ = runner_generator.write_into(&mut writer);
-        let _ = writer.flush();
-        let runner_path = runner_path
-            .canonicalize()
-            .expect("Runner path should exist");
-
-        // Build with NVCC
-
-        let mut nvcc_command = process::Command::new("nvcc");
-        nvcc_command
-            .arg("-rdc=true")
-            .arg("-I")
-            .arg(
-                &generated_dir
-                    .canonicalize()
-                    .expect("Output directory should exist"),
-            )
-            .arg("-O3")
-            .arg("-lineinfo")
-            .arg(
-                PathBuf::from(&args.input_file_path)
-                    .canonicalize()
-                    .expect("User provided file path should exist"),
-            )
-            .arg(runner_path)
-            .arg("-o")
-            .arg(&binary_path);
-
-        match nvcc_command.output() {
-            Ok(out) => {
-                if out.status.success() {
-                    info!("Compiled binary {}", binary_path.to_string_lossy())
-                } else {
-                    error!("Error in NVCC: {}", String::from_utf8_lossy(&out.stderr));
-                }
-            }
-            Err(e) => error!("Error in NVCC: {e}"),
-        }
+        let binary_path = compile_runner(
+            runner_generator,
+            &pair_dir,
+            &generated_dir,
+            &user_input_file,
+        );
 
         // Run nsys command on generated binary
 
         let nsys_output_file = pair_dir.join("report");
-        let mut nsys_command = process::Command::new("nsys");
-        nsys_command
-            .arg("profile")
-            .arg("-o")
-            .arg(format!("{}", nsys_output_file.to_string_lossy()))
-            .arg(format!("{}", binary_path.to_string_lossy()));
-
-        match nsys_command.output() {
-            Ok(out) => {
-                if out.status.success() {
-                    info!("Nsys completed for {}", pair.to_pair_name());
-                } else {
-                    error!("Error from NSYS: {}", String::from_utf8_lossy(&out.stderr));
-                }
-            }
-            Err(e) => error!("Error running NSYS: {e}"),
-        }
-
-        let mut nsys_stats_command = process::Command::new("nsys");
-        nsys_stats_command
-            .arg("stats")
-            .arg("--report")
-            .arg("cuda_gpu_trace,cuda_api_trace")
-            .arg("--format")
-            .arg("csv")
-            .arg("--output")
-            .arg(format!("{}", nsys_output_file.to_string_lossy()))
-            .arg(format!("{}.nsys-rep", nsys_output_file.to_string_lossy()));
-
-        match nsys_stats_command.output() {
-            Ok(out) => {
-                if out.status.success() {
-                    info!("Nsys stats completed for {}", pair.to_pair_name());
-                } else {
-                    error!(
-                        "Error from NSYS stats: {}",
-                        String::from_utf8_lossy(&out.stderr)
-                    );
-                }
-            }
-            Err(e) => error!("Error running NSYS stats: {e}"),
-        }
-
-        let api_trace_file = nsys_output_file.with_file_name(format!(
-            "{}_cuda_api_trace.csv",
-            nsys_output_file
-                .file_name()
-                .and_then(|s| s.to_str())
-                .expect("Nsys output file should have some filename component")
-        ));
-        let gpu_trace_file = nsys_output_file.with_file_name(format!(
-            "{}_cuda_gpu_trace.csv",
-            nsys_output_file
-                .file_name()
-                .and_then(|s| s.to_str())
-                .expect("Nsys output file should have some filename component")
-        ));
+        run_nsys(&binary_path, &nsys_output_file, &pair.to_pair_name());
+        let (api_trace_file, gpu_trace_file) =
+            get_nsys_trace_paths(&nsys_output_file, &pair.to_pair_name());
 
         let calc_start = std::time::Instant::now();
 
@@ -313,6 +382,7 @@ fn main() {
             .with_columns([
                 (col("Total Count") - col("Overlapping Kernels")).alias("Excluded Kernels")
             ]);
+        let paired_duration_summary = get_gpu_duration_summary(concurrent_user_kernels.clone());
 
         let queue_overhead_data = api_data
             .clone()
@@ -335,20 +405,29 @@ fn main() {
             queue_overhead_data,
             concurrent_user_kernels,
             kernel_count_summary,
+            paired_duration_summary,
         ] = collect_all_array([
             final_executions_data,
             queue_overhead_data,
             concurrent_user_kernels,
             kernel_count_summary,
+            paired_duration_summary,
         ])
         .unwrap();
 
         let calc_end = std::time::Instant::now();
 
-        println!("Queue Launch Overhead: {}", queue_overhead_data.head(Some(10)));
+        println!(
+            "Queue Launch Overhead: {}",
+            queue_overhead_data.head(Some(10))
+        );
         // println!("{}", final_executions_data);
-        println!("Concurrent kernel [Head 5]: {}", concurrent_user_kernels.head(Some(5)));
+        println!(
+            "Concurrent kernel [Head 5]: {}",
+            concurrent_user_kernels.head(Some(5))
+        );
         println!("Kernel Inc/Ex Count: {}", kernel_count_summary);
+        println!("Duration Summary: {}", paired_duration_summary);
         println!("Polars calculations took {:#?}", calc_end - calc_start);
     }
 }

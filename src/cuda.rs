@@ -77,6 +77,13 @@ impl Kernel {
     fn default_shared_memory_bytes() -> u32 {
         0
     }
+    pub fn get_stream<'a>(&self, config: &'a CudaConfig) -> Option<&'a Stream> {
+        config
+            .streams
+            .iter()
+            .filter(|s| s.name == self.stream)
+            .next()
+    }
 }
 
 #[derive(serde::Deserialize, Debug)]

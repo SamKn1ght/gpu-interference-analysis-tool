@@ -18,6 +18,29 @@ pub fn collect_all_array<const N: usize>(
     })
 }
 
+pub fn get_gpu_duration_summary(frame: LazyFrame) -> LazyFrame {
+    frame
+        .clone()
+        .group_by([col(CudaGpuTrace::NAME)])
+        .agg([
+            col(CudaGpuTrace::DURATION).mean().alias("Mean"),
+            col(CudaGpuTrace::DURATION).median().alias("Median"),
+            col(CudaGpuTrace::DURATION).std(1).alias("Std. Dev"),
+            col(CudaGpuTrace::DURATION)
+                .quantile(lit(0.95), QuantileMethod::Linear)
+                .alias("95%"),
+            col(CudaGpuTrace::DURATION)
+                .quantile(lit(0.99), QuantileMethod::Linear)
+                .alias("99%"),
+            col(CudaGpuTrace::DURATION).max().alias("Max"),
+        ])
+        .with_columns([
+            (col("Mean") - col("Median")).alias("Skew"),
+            (col("Std. Dev").cast(DataType::Float64) / col("Mean").cast(DataType::Float64))
+                .alias("Coefficient of Variation"),
+        ])
+}
+
 pub fn lazy_load_api_trace_dataframe(path: &Path) -> Result<LazyFrame, Box<dyn Error>> {
     Ok(LazyCsvReader::new(PlRefPath::try_from_path(path)?)
         .with_schema(Some(Arc::new(CudaApiTrace::get_schema())))
@@ -66,20 +89,7 @@ impl ToSchema for CudaApiTrace {
         Schema::from_iter(vec![
             Field::new(Self::START.into(), DataType::Int64),
             Field::new(Self::DURATION.into(), DataType::Int64),
-            Field::new(
-                Self::NAME.into(),
-                DataType::Categorical(
-                    Categories::new(
-                        "FUNCTION_NAMES".into(),
-                        "NAMES".into(),
-                        CategoricalPhysical::U32,
-                    ),
-                    Arc::new(CategoricalMapping::with_hasher(
-                        u32::MAX as usize,
-                        Default::default(),
-                    )),
-                ),
-            ),
+            Field::new(Self::NAME.into(), DataType::String),
             Field::new(Self::RESULT.into(), DataType::Int32),
             Field::new(Self::CORR_ID.into(), DataType::UInt64),
             Field::new(Self::PID.into(), DataType::Int32),
@@ -132,65 +142,13 @@ impl ToSchema for CudaGpuTrace {
             Field::new(Self::DYN_SHARED_MEM.into(), DataType::Float32),
             Field::new(Self::BYTES.into(), DataType::Float32),
             Field::new(Self::THROUGHPUT.into(), DataType::Float32),
-            Field::new(
-                Self::SOURCE_MEM_KIND.into(),
-                DataType::Categorical(
-                    Categories::new(
-                        "MEM_KINDS".into(),
-                        "GPU_TRACE".into(),
-                        CategoricalPhysical::U32,
-                    ),
-                    Arc::new(CategoricalMapping::with_hasher(
-                        u32::MAX as usize,
-                        Default::default(),
-                    )),
-                ),
-            ),
-            Field::new(
-                Self::DEST_MEM_KIND.into(),
-                DataType::Categorical(
-                    Categories::new(
-                        "MEM_KINDS".into(),
-                        "GPU_TRACE".into(),
-                        CategoricalPhysical::U32,
-                    ),
-                    Arc::new(CategoricalMapping::with_hasher(
-                        u32::MAX as usize,
-                        Default::default(),
-                    )),
-                ),
-            ),
-            Field::new(
-                Self::DEVICE.into(),
-                DataType::Categorical(
-                    Categories::new(
-                        "DEVICES".into(),
-                        "GPU_TRACE".into(),
-                        CategoricalPhysical::U8,
-                    ),
-                    Arc::new(CategoricalMapping::with_hasher(
-                        u8::MAX as usize,
-                        Default::default(),
-                    )),
-                ),
-            ),
+            Field::new(Self::SOURCE_MEM_KIND.into(), DataType::String),
+            Field::new(Self::DEST_MEM_KIND.into(), DataType::String),
+            Field::new(Self::DEVICE.into(), DataType::String),
             Field::new(Self::CONTEXT.into(), DataType::UInt32),
             Field::new(Self::GREEN_CONTEXT.into(), DataType::UInt32),
             Field::new(Self::STREAM.into(), DataType::UInt32),
-            Field::new(
-                Self::NAME.into(),
-                DataType::Categorical(
-                    Categories::new(
-                        "FUNCTION_NAMES".into(),
-                        "NAMES".into(),
-                        CategoricalPhysical::U8,
-                    ),
-                    Arc::new(CategoricalMapping::with_hasher(
-                        u8::MAX as usize,
-                        Default::default(),
-                    )),
-                ),
-            ),
+            Field::new(Self::NAME.into(), DataType::String),
         ])
     }
 }

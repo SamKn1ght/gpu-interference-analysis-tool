@@ -14,27 +14,20 @@ int main() {
 
     DataPointers data;
 
-    {% for stream in config.streams %}
     cudaStream_t {{ stream.name }};
     cudaStreamCreateWithPriority(&{{ stream.name }}, cudaStreamNonBlocking, {{ stream.priority.unwrap_or(0) }});
-    {% endfor %}
 
     setup(&data);
 
-    {% for stream in config.streams %}
     cudaStreamSynchronize({{ stream.name }});
-    {% endfor %}
 
     for (int i = 0; i < ITERS; i++) {
         auto frame_start = std::chrono::high_resolution_clock::now();
-        {% for i in 0..2 -%}
-        {% let kernel = config.kernels[i] %}
-        {{ kernel.name }}<<<{{ kernel.blocks }}, {{ kernel.threads }}, 0, {{ kernel.stream }}>>>(
+        {{ kernel.name }}<<<{{ kernel.blocks }}, {{ kernel.threads }}, {{ kernel.shared_memory_bytes }}, {{ kernel.stream }}>>>(
             {%- for arg in kernel.args -%}
             data.{% if arg.datatype.ends_with('*') %}d_{% endif %}{{ arg.name }}{% if !loop.last %}, {% endif %}
             {%- endfor -%}
         );
-        {% endfor %}
         auto end_time = std::chrono::high_resolution_clock::now();
         {% if let Some(frame_budget) = config.frame_budget %}
         {% if frame_budget.method == DelayMethod::Busy %}
@@ -48,9 +41,7 @@ int main() {
         {% endif %}
     }
 
-    {% for stream in config.streams %}
     cudaStreamSynchronize({{ stream.name }});
-    {% endfor %}
 
     free_data(&data);
 
