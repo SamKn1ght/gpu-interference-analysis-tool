@@ -283,7 +283,7 @@ fn main() {
     let duration_summaries = concat(&duration_summary_rows, UnionArgs::default()).unwrap();
     println!(
         "Duration Summary: {}",
-        duration_summaries.collect().unwrap()
+        duration_summaries.clone().collect().unwrap()
     );
 
     // Generate runner files for pairings
@@ -400,18 +400,46 @@ fn main() {
                 col(LAUNCH_LATENCY_STR),
             ]);
 
+        let duration_slowdown_summary = paired_duration_summary
+            .clone()
+            .join(
+                duration_summaries.clone(),
+                [col(CudaGpuTrace::NAME)],
+                [col(CudaGpuTrace::NAME)],
+                JoinArgs::new(JoinType::Inner),
+            )
+            .with_columns([
+                (col("Mean").cast(DataType::Float64) / col("Mean_right").cast(DataType::Float64))
+                    .alias("Mean"),
+                (col("95%").cast(DataType::Float64) / col("95%_right").cast(DataType::Float64))
+                    .alias("95%"),
+                (col("99%").cast(DataType::Float64) / col("99%_right").cast(DataType::Float64))
+                    .alias("99%"),
+                (col("Max").cast(DataType::Float64) / col("Max_right").cast(DataType::Float64))
+                    .alias("Max"),
+            ])
+            .select([
+                col(CudaGpuTrace::NAME),
+                col("Mean"),
+                col("95%"),
+                col("99%"),
+                col("Max"),
+            ]);
+
         let [
             final_executions_data,
             queue_overhead_data,
             concurrent_user_kernels,
             kernel_count_summary,
             paired_duration_summary,
+            duration_slowdown_summary,
         ] = collect_all_array([
             final_executions_data,
             queue_overhead_data,
             concurrent_user_kernels,
             kernel_count_summary,
             paired_duration_summary,
+            duration_slowdown_summary,
         ])
         .unwrap();
 
@@ -428,6 +456,7 @@ fn main() {
         );
         println!("Kernel Inc/Ex Count: {}", kernel_count_summary);
         println!("Duration Summary: {}", paired_duration_summary);
+        println!("Duration Slowdown Summary: {}", duration_slowdown_summary);
         println!("Polars calculations took {:#?}", calc_end - calc_start);
     }
 }
