@@ -137,6 +137,8 @@ fn run_nsys(binary_path: &Path, output_file: &Path, trial_name: &str) {
     let mut nsys_command = process::Command::new("nsys");
     nsys_command
         .arg("profile")
+        .arg("--trace")
+        .arg("cuda")
         .arg("-o")
         .arg(format!("{}", output_file.to_string_lossy()))
         .arg(format!("{}", binary_path.to_string_lossy()));
