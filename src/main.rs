@@ -290,6 +290,8 @@ fn main() {
 
     // Generate runner files for pairings
 
+    let mut pair_duration_change_rows =
+        Vec::with_capacity(&cuda_config.kernels.len() * (&cuda_config.kernels.len() - 1) / 2);
     for pair in PairedKernelView::iter_unique_kernel_pairs(&cuda_config) {
         // Generate files
         let runner_generator = PairedRunner {
@@ -334,15 +336,8 @@ fn main() {
         let kernel_b_last_execution_row = final_executions_data
             .clone()
             .filter(col(CudaGpuTrace::NAME).eq(lit(pair.get_kernel_names()[1])));
-        let last_executions = LazyFrame::collect_all_with_engine(
-            vec![
-                kernel_a_last_execution_row.logical_plan,
-                kernel_b_last_execution_row.logical_plan,
-            ],
-            Engine::Auto,
-            OptFlags::default(),
-        )
-        .unwrap();
+        let last_executions =
+            collect_all_array([kernel_a_last_execution_row, kernel_b_last_execution_row]).unwrap();
         let kernel_a_last_end = lit(last_executions[0]
             .column("Max End")
             .unwrap()
@@ -411,6 +406,8 @@ fn main() {
                 JoinArgs::new(JoinType::Inner),
             )
             .with_columns([
+                lit(pair.get_kernel_names()[0]).alias("Kernel A"),
+                lit(pair.get_kernel_names()[1]).alias("Kernel B"),
                 (col("Mean").cast(DataType::Float64) / col("Mean_right").cast(DataType::Float64))
                     .alias("Mean"),
                 (col("95%").cast(DataType::Float64) / col("95%_right").cast(DataType::Float64))
@@ -419,14 +416,21 @@ fn main() {
                     .alias("99%"),
                 (col("Max").cast(DataType::Float64) / col("Max_right").cast(DataType::Float64))
                     .alias("Max"),
+                (col("Coefficient of Variation").cast(DataType::Float64)
+                    / col("Coefficient of Variation_right").cast(DataType::Float64))
+                .alias("Coefficient of Variation"),
             ])
             .select([
+                col("Kernel A"),
+                col("Kernel B"),
                 col(CudaGpuTrace::NAME),
                 col("Mean"),
                 col("95%"),
                 col("99%"),
                 col("Max"),
+                col("Coefficient of Variation"),
             ]);
+        pair_duration_change_rows.push(duration_slowdown_summary.clone());
 
         let [
             final_executions_data,
@@ -452,15 +456,126 @@ fn main() {
             queue_overhead_data.head(Some(10))
         );
         // println!("{}", final_executions_data);
-        println!(
-            "Concurrent kernel [Head 5]: {}",
-            concurrent_user_kernels.head(Some(5))
-        );
+        // println!(
+        //     "Concurrent kernel [Head 5]: {}",
+        //     concurrent_user_kernels.head(Some(5))
+        // );
         println!("Kernel Inc/Ex Count: {}", kernel_count_summary);
         println!("Duration Summary: {}", paired_duration_summary);
         println!("Duration Slowdown Summary: {}", duration_slowdown_summary);
         println!("Polars calculations took {:#?}", calc_end - calc_start);
     }
+    let paired_kernel_duration_summary = concat(pair_duration_change_rows, UnionArgs::default())
+        .unwrap()
+        .with_columns([
+            col("99%").min().alias("99% Min"),
+            col("99%").max().alias("99% Max"),
+            col("Coefficient of Variation")
+                .min()
+                .alias("Coefficient of Variation Min"),
+            col("Coefficient of Variation")
+                .max()
+                .alias("Coefficient of Variation Max"),
+        ])
+        .with_columns([
+            ((col("99%") - col("99% Min")) / (col("99% Max") - col("99% Min"))).alias("Norm 99%"),
+            ((col("Coefficient of Variation") - col("Coefficient of Variation Min"))
+                / (col("Coefficient of Variation Max") - col("Coefficient of Variation Min")))
+            .alias("Norm Coefficient of Variation"),
+            when(col(CudaGpuTrace::NAME).eq("Kernel A"))
+                .then(col("Kernel B"))
+                .otherwise(col("Kernel A"))
+                .alias("Opposing Kernel"),
+        ])
+        .with_column(
+            (((lit(1.0) + col("Norm 99%")).pow(lit(0.75))
+                * (lit(1.0) + col("Norm Coefficient of Variation")).pow(0.25))
+                - lit(1.0))
+            .alias("Interference Impact"),
+        )
+        .select([
+            // col("Kernel A"),
+            // col("Kernel B"),
+            col(CudaGpuTrace::NAME),
+            col("Opposing Kernel"),
+            col("Norm 99%"),
+            col("Norm Coefficient of Variation"),
+            col("Interference Impact"),
+        ])
+        .sort(
+            ["Interference Impact"],
+            SortMultipleOptions::default().with_order_descending(true),
+        );
+    println!(
+        "Paired Table: {:?}",
+        paired_kernel_duration_summary.clone().collect().unwrap()
+    );
+    let tmp_aggression_score = paired_kernel_duration_summary
+        .clone()
+        .group_by(["Opposing Kernel"])
+        .agg([col("Interference Impact").mean().alias("Aggression")])
+        .sort(
+            ["Aggression"],
+            SortMultipleOptions::default().with_order_descending(true),
+        );
+    println!(
+        "Sensitivity Table: {:?}",
+        tmp_aggression_score.clone().collect().unwrap()
+    );
+    let sensitivity_score = paired_kernel_duration_summary
+        .clone()
+        .join(
+            tmp_aggression_score.clone(),
+            [col("Opposing Kernel")],
+            [col("Opposing Kernel")],
+            JoinArgs::new(JoinType::Inner),
+        )
+        .with_column(
+            (col("Interference Impact")
+                * (col("Aggression").mean() / (col("Aggression") + lit(1e-9))))
+            .alias("Weighted Sensitivity"),
+        )
+        .group_by([CudaGpuTrace::NAME])
+        .agg([
+            col("Interference Impact").mean().alias("Naive Sensitivity"),
+            col("Weighted Sensitivity")
+                .mean()
+                .alias("Weighted Sensitivity"),
+        ]);
+    let aggression_score = paired_kernel_duration_summary
+        .clone()
+        .join(
+            sensitivity_score.clone(),
+            [col(CudaGpuTrace::NAME)],
+            [col(CudaGpuTrace::NAME)],
+            JoinArgs::new(JoinType::Inner),
+        )
+        .with_column(
+            (col("Interference Impact")
+                * (col("Naive Sensitivity").mean() / (col("Naive Sensitivity") + lit(1e-9))))
+            .alias("Weighted Aggression"),
+        )
+        .group_by(["Opposing Kernel"])
+        .agg([
+            col("Interference Impact").mean().alias("Naive Aggression"),
+            col("Weighted Aggression")
+                .mean()
+                .alias("Weighted Aggression"),
+        ]);
+    println!(
+        "Sensitivity Table: {:?}",
+        sensitivity_score.clone().collect().unwrap()
+    );
+    let final_kernel_scorings = sensitivity_score.clone().join(
+        aggression_score.clone(),
+        [col(CudaGpuTrace::NAME)],
+        [col("Opposing Kernel")],
+        JoinArgs::new(JoinType::Inner),
+    );
+    println!(
+        "Kernel Scores: {}",
+        final_kernel_scorings.clone().collect().unwrap()
+    );
 }
 
 const LAUNCH_LATENCY_STR: &str = "Launch Latency (ns)";
