@@ -18,6 +18,48 @@ pub fn collect_all_array<const N: usize>(
     })
 }
 
+pub fn get_pivoted_table_for_attribute(
+    frame: LazyFrame,
+    attribute: &'static str,
+    name_column_alias: &'static str,
+) -> LazyFrame {
+    frame
+        .clone()
+        .pivot(
+            Selector::ByName {
+                names: Arc::new([PlSmallStr::from_static("Opposing Kernel")]),
+                strict: true,
+            },
+            Arc::new(
+                frame
+                    .select([col("Opposing Kernel")])
+                    .unique(None, UniqueKeepStrategy::First)
+                    .sort(
+                        [PlSmallStr::from_static("Opposing Kernel")],
+                        SortMultipleOptions::default(),
+                    )
+                    .collect()
+                    .unwrap(),
+            ),
+            Selector::ByName {
+                names: Arc::new([PlSmallStr::from_static(CudaGpuTrace::NAME)]),
+                strict: true,
+            },
+            Selector::ByName {
+                names: Arc::new([PlSmallStr::from_static(attribute)]),
+                strict: true,
+            },
+            element().first(),
+            true,
+            PlSmallStr::from_static(""),
+        )
+        .sort(
+            [PlSmallStr::from_static(CudaGpuTrace::NAME)],
+            SortMultipleOptions::default(),
+        )
+        .rename([CudaGpuTrace::NAME], [name_column_alias], true)
+}
+
 pub fn get_gpu_duration_summary(frame: LazyFrame) -> LazyFrame {
     frame
         .clone()

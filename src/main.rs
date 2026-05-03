@@ -15,7 +15,8 @@ use crate::{
     cuda::{CudaConfig, DelayMethod, Kernel, Stream},
     data::{
         CudaApiTrace, CudaGpuTrace, collect_all_array, get_gpu_duration_summary,
-        lazy_load_api_trace_dataframe, lazy_load_gpu_trace_dataframe,
+        get_pivoted_table_for_attribute, lazy_load_api_trace_dataframe,
+        lazy_load_gpu_trace_dataframe,
     },
     views::{GpuPipelineView, PairedKernelView},
 };
@@ -494,8 +495,6 @@ fn main() {
             .alias("Interference Impact"),
         )
         .select([
-            // col("Kernel A"),
-            // col("Kernel B"),
             col(CudaGpuTrace::NAME),
             col("Opposing Kernel"),
             col("Norm 99%"),
@@ -518,11 +517,15 @@ fn main() {
             ["Aggression"],
             SortMultipleOptions::default().with_order_descending(true),
         );
-    println!(
-        "Sensitivity Table: {:?}",
-        tmp_aggression_score.clone().collect().unwrap()
-    );
-    let sensitivity_score = paired_kernel_duration_summary
+    let global_aggression_mean = tmp_aggression_score
+        .clone()
+        .collect()
+        .unwrap()
+        .column("Aggression")
+        .unwrap()
+        .mean_reduce()
+        .unwrap();
+    let sensitivity_scores = paired_kernel_duration_summary
         .clone()
         .join(
             tmp_aggression_score.clone(),
@@ -532,9 +535,11 @@ fn main() {
         )
         .with_column(
             (col("Interference Impact")
-                * (col("Aggression").mean() / (col("Aggression") + lit(1e-9))))
+                * (lit(global_aggression_mean) / (col("Aggression") + lit(1e-9))))
             .alias("Weighted Sensitivity"),
-        )
+        );
+    let sensitivity_score_summary = sensitivity_scores
+        .clone()
         .group_by([CudaGpuTrace::NAME])
         .agg([
             col("Interference Impact").mean().alias("Naive Sensitivity"),
@@ -542,19 +547,29 @@ fn main() {
                 .mean()
                 .alias("Weighted Sensitivity"),
         ]);
-    let aggression_score = paired_kernel_duration_summary
+    let global_sensitivity_mean = sensitivity_score_summary
+        .clone()
+        .collect()
+        .unwrap()
+        .column("Naive Sensitivity")
+        .unwrap()
+        .mean_reduce()
+        .unwrap();
+    let aggression_scores = paired_kernel_duration_summary
         .clone()
         .join(
-            sensitivity_score.clone(),
+            sensitivity_score_summary.clone(),
             [col(CudaGpuTrace::NAME)],
             [col(CudaGpuTrace::NAME)],
             JoinArgs::new(JoinType::Inner),
         )
         .with_column(
             (col("Interference Impact")
-                * (col("Naive Sensitivity").mean() / (col("Naive Sensitivity") + lit(1e-9))))
+                * (lit(global_sensitivity_mean) / (col("Naive Sensitivity") + lit(1e-9))))
             .alias("Weighted Aggression"),
-        )
+        );
+    let aggression_score_summary = aggression_scores
+        .clone()
         .group_by(["Opposing Kernel"])
         .agg([
             col("Interference Impact").mean().alias("Naive Aggression"),
@@ -562,20 +577,54 @@ fn main() {
                 .mean()
                 .alias("Weighted Aggression"),
         ]);
-    println!(
-        "Sensitivity Table: {:?}",
-        sensitivity_score.clone().collect().unwrap()
-    );
-    let final_kernel_scorings = sensitivity_score.clone().join(
-        aggression_score.clone(),
+    let final_kernel_scorings = sensitivity_score_summary.clone().join(
+        aggression_score_summary.clone(),
         [col(CudaGpuTrace::NAME)],
         [col("Opposing Kernel")],
         JoinArgs::new(JoinType::Inner),
     );
     println!(
         "Kernel Scores: {}",
-        final_kernel_scorings.clone().collect().unwrap()
+        final_kernel_scorings
+            .clone()
+            .sort([CudaGpuTrace::NAME], SortMultipleOptions::default())
+            .collect()
+            .unwrap()
     );
+    let start = std::time::Instant::now();
+    let [
+        pivoted_naive_impact_scores,
+        pivoted_weighted_sensitivity_scores,
+        pivoted_weighted_aggression_scores,
+    ] = collect_all_array([
+        get_pivoted_table_for_attribute(
+            sensitivity_scores.clone(),
+            "Interference Impact",
+            r"Victim \ Aggressor",
+        ),
+        get_pivoted_table_for_attribute(
+            sensitivity_scores.clone(),
+            "Weighted Sensitivity",
+            r"Victim \ Aggressor",
+        ),
+        get_pivoted_table_for_attribute(
+            aggression_scores.clone(),
+            "Weighted Aggression",
+            r"Victim \ Aggressor",
+        ),
+    ])
+    .unwrap();
+    let end = std::time::Instant::now();
+    println!("Pivoted Naive Impacts: {}", pivoted_naive_impact_scores);
+    println!(
+        "Pivoted Weighted Sensitivity: {}",
+        pivoted_weighted_sensitivity_scores
+    );
+    println!(
+        "Pivoted Weighted Aggression: {}",
+        pivoted_weighted_aggression_scores
+    );
+    println!("Pivoting took {:#?}", end - start);
 }
 
 const LAUNCH_LATENCY_STR: &str = "Launch Latency (ns)";
