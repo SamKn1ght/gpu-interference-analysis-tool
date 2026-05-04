@@ -1,4 +1,8 @@
-use std::{error::Error, path::Path};
+use std::{
+    error::Error,
+    fs::File,
+    path::{Path, PathBuf},
+};
 
 use polars::prelude::*;
 
@@ -16,6 +20,11 @@ pub fn collect_all_array<const N: usize>(
             "Number of lazy frames mismatched to constant value N in collect_all_arr".into(),
         )
     })
+}
+
+pub fn write_to_csv(path: &Path, df: &mut DataFrame) -> PolarsResult<()> {
+    let file = File::create(path).unwrap();
+    CsvWriter::new(file).include_header(true).finish(df)
 }
 
 pub fn get_pivoted_table_for_attribute(

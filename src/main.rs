@@ -1,9 +1,9 @@
 use askama::Template;
 use clap::Parser;
-use log::{error, info};
+use log::{debug, error, info};
 use polars::{prelude::*, series::Series};
 use std::{
-    fs,
+    fs::{self},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
     process,
@@ -16,7 +16,7 @@ use crate::{
     data::{
         CudaApiTrace, CudaGpuTrace, collect_all_array, get_gpu_duration_summary,
         get_pivoted_table_for_attribute, lazy_load_api_trace_dataframe,
-        lazy_load_gpu_trace_dataframe,
+        lazy_load_gpu_trace_dataframe, write_to_csv,
     },
     views::{GpuPipelineView, PairedKernelView},
 };
@@ -464,7 +464,7 @@ fn main() {
         println!("Kernel Inc/Ex Count: {}", kernel_count_summary);
         println!("Duration Summary: {}", paired_duration_summary);
         println!("Duration Slowdown Summary: {}", duration_slowdown_summary);
-        println!("Polars calculations took {:#?}", calc_end - calc_start);
+        debug!("Polars calculations took {:#?}", calc_end - calc_start);
     }
     let paired_kernel_duration_summary = concat(pair_duration_change_rows, UnionArgs::default())
         .unwrap()
@@ -583,19 +583,12 @@ fn main() {
         [col("Opposing Kernel")],
         JoinArgs::new(JoinType::Inner),
     );
-    println!(
-        "Kernel Scores: {}",
-        final_kernel_scorings
-            .clone()
-            .sort([CudaGpuTrace::NAME], SortMultipleOptions::default())
-            .collect()
-            .unwrap()
-    );
     let start = std::time::Instant::now();
     let [
-        pivoted_naive_impact_scores,
-        pivoted_weighted_sensitivity_scores,
-        pivoted_weighted_aggression_scores,
+        mut pivoted_naive_impact_scores,
+        mut pivoted_weighted_sensitivity_scores,
+        mut pivoted_weighted_aggression_scores,
+        mut final_kernel_scorings,
     ] = collect_all_array([
         get_pivoted_table_for_attribute(
             sensitivity_scores.clone(),
@@ -612,9 +605,13 @@ fn main() {
             "Weighted Aggression",
             r"Victim \ Aggressor",
         ),
+        final_kernel_scorings
+            .clone()
+            .sort([CudaGpuTrace::NAME], SortMultipleOptions::default()),
     ])
     .unwrap();
     let end = std::time::Instant::now();
+    println!("Kernel Scores: {}", final_kernel_scorings);
     println!("Pivoted Naive Impacts: {}", pivoted_naive_impact_scores);
     println!(
         "Pivoted Weighted Sensitivity: {}",
@@ -624,7 +621,28 @@ fn main() {
         "Pivoted Weighted Aggression: {}",
         pivoted_weighted_aggression_scores
     );
-    println!("Pivoting took {:#?}", end - start);
+    debug!("Pivoting took {:#?}", end - start);
+
+    write_to_csv(
+        &global_config.new_output_file("naive_impact_scores.csv"),
+        &mut pivoted_naive_impact_scores,
+    )
+    .unwrap();
+    write_to_csv(
+        &global_config.new_output_file("weighted_sensitivity_scores.csv"),
+        &mut pivoted_weighted_sensitivity_scores,
+    )
+    .unwrap();
+    write_to_csv(
+        &global_config.new_output_file("weighted_aggression_scores.csv"),
+        &mut pivoted_weighted_aggression_scores,
+    )
+    .unwrap();
+    write_to_csv(
+        &global_config.new_output_file("kernel_score_summary.csv"),
+        &mut final_kernel_scorings,
+    )
+    .unwrap();
 }
 
 const LAUNCH_LATENCY_STR: &str = "Launch Latency (ns)";
