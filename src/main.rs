@@ -15,7 +15,7 @@ use crate::{
     cuda::{CudaConfig, DelayMethod, Kernel, Stream},
     data::{
         CudaApiTrace, CudaGpuTrace, collect_all_array, get_gpu_duration_summary,
-        get_pivoted_table_for_attribute, lazy_load_api_trace_dataframe,
+        get_pivoted_table_for_attribute, get_system_latency_summary, lazy_load_api_trace_dataframe,
         lazy_load_gpu_trace_dataframe, write_to_csv,
     },
     views::{GpuPipelineView, PairedKernelView},
@@ -256,7 +256,8 @@ fn main() {
     // Generate baseline data
 
     let baseline_path = global_config.new_output_file("baseline");
-    let mut duration_summary_rows = Vec::with_capacity(cuda_config.kernels.len());
+    let mut gpu_kernel_rows = Vec::with_capacity(cuda_config.kernels.len());
+    let mut api_data_rows = Vec::with_capacity(cuda_config.kernels.len());
     for kernel in &cuda_config.kernels {
         let runner_generator = SingleRunner {
             config: &cuda_config,
@@ -280,13 +281,69 @@ fn main() {
         let gpu_data = lazy_load_gpu_trace_dataframe(&gpu_trace_file).unwrap();
         let single_execution_duration_stats = gpu_data
             .clone()
-            .filter(col(CudaGpuTrace::NAME).eq(lit(kernel.name.clone())));
-        duration_summary_rows.push(get_gpu_duration_summary(single_execution_duration_stats));
+            .filter(col(CudaGpuTrace::NAME).eq(lit(kernel.name.clone())))
+            .sort([CudaGpuTrace::CORR_ID], SortMultipleOptions::default())
+            .with_row_index("Instance ID", None)
+            .filter(col("Instance ID").gt_eq(1));
+        gpu_kernel_rows.push(get_gpu_duration_summary(single_execution_duration_stats));
+
+        let api_data = lazy_load_api_trace_dataframe(&api_trace_file)
+            .unwrap()
+            .filter(
+                (col(CudaApiTrace::NAME).eq(lit("cuKernelGetName")))
+                    .or(col(CudaApiTrace::NAME).eq(lit("cudaLaunchKernel"))),
+            )
+            .join(
+                gpu_data.clone().select([
+                    col(CudaGpuTrace::CORR_ID),
+                    col(CudaGpuTrace::NAME),
+                    col(CudaGpuTrace::END),
+                ]),
+                [col(CudaApiTrace::CORR_ID)],
+                [col(CudaGpuTrace::CORR_ID)],
+                JoinArgs::new(JoinType::Left),
+            )
+            .rename(
+                [
+                    format!("{}_right", CudaGpuTrace::NAME),
+                    format!("{}_right", CudaGpuTrace::END),
+                ],
+                ["Kernel Name", "Kernel End"],
+                true,
+            )
+            .sort([CudaApiTrace::CORR_ID], SortMultipleOptions::default())
+            .with_row_index("Instance ID", None)
+            .with_column(col("Instance ID") / lit(2))
+            .filter(col("Instance ID").gt_eq(1))
+            .group_by([col("Instance ID")])
+            .agg([
+                col("Kernel Name").first_non_null(),
+                col(CudaApiTrace::START).min().alias("Frame Start"),
+                col("Kernel End").max().alias("Frame End"),
+            ])
+            .with_column((col("Frame End") - col("Frame Start")).alias("System Latency"))
+            .with_column(
+                lit(cuda_config.get_frame_budget().duration.as_nanos()).alias("Frame Allowance"),
+            )
+            .with_columns([
+                col("System Latency")
+                    .gt(col("Frame Allowance"))
+                    .alias("Missed Deadline"),
+                (col("System Latency").cast(DataType::Float64)
+                    / col("Frame Allowance").cast(DataType::Float64))
+                .alias("Frame Allowance Usage"),
+            ]);
+        api_data_rows.push(get_system_latency_summary(api_data));
     }
-    let duration_summaries = concat(&duration_summary_rows, UnionArgs::default()).unwrap();
+    let duration_summaries = concat(&gpu_kernel_rows, UnionArgs::default()).unwrap();
+    let system_latency_summaries = concat(&api_data_rows, UnionArgs::default()).unwrap();
     println!(
         "Duration Summary: {}",
         duration_summaries.clone().collect().unwrap()
+    );
+    println!(
+        "System Latency Summary: {}",
+        system_latency_summaries.clone().collect().unwrap()
     );
 
     // Generate runner files for pairings
@@ -318,13 +375,39 @@ fn main() {
 
         let calc_start = std::time::Instant::now();
 
-        let api_data = lazy_load_api_trace_dataframe(&api_trace_file).unwrap();
         let gpu_data = lazy_load_gpu_trace_dataframe(&gpu_trace_file).unwrap();
+        let api_data = lazy_load_api_trace_dataframe(&api_trace_file).unwrap();
 
         let kernel_names_series = Series::new("Kernel Names".into(), pair.get_kernel_names());
+        // let single_execution_duration_stats = gpu_data
+        //     .clone()
+        //     .filter(col(CudaGpuTrace::NAME).eq(lit(kernel.name.clone())))
+        //     .sort([CudaGpuTrace::CORR_ID], SortMultipleOptions::default())
+        //     .with_row_index("Instance ID", None)
+        //     .filter(col("Instance ID").gt_eq(1));
+
+        // .sort([CudaApiTrace::CORR_ID], SortMultipleOptions::default())
+        // .with_columns_seq([
+        //     col("Kernel Name").fill_null_with_strategy(FillNullStrategy::Backward(None)),
+        //     col("Kernel Name")
+        //         .cum_count(false)
+        //         .over(["Kernel Name"])
+        //         .alias("Instance ID"),
+        // ])
+        // .filter(col("Instance ID").gt(lit(1)))
+        // .with_column(col("Instance ID") - lit(1))
         let user_kernels_filtered = gpu_data
             .clone()
-            .filter(col(CudaGpuTrace::NAME).is_in(lit(kernel_names_series).implode(), false));
+            .filter(col(CudaGpuTrace::NAME).is_in(lit(kernel_names_series).implode(), false))
+            .sort([CudaGpuTrace::CORR_ID], SortMultipleOptions::default())
+            .with_column(
+                col(CudaGpuTrace::NAME)
+                    .cum_count(false)
+                    .over([CudaGpuTrace::NAME])
+                    .alias("Instance ID"),
+            )
+            .filter(col("Instance ID").gt(lit(1)))
+            .with_column(col("Instance ID") - lit(1));
         let final_executions_data = user_kernels_filtered
             .clone()
             .group_by([col(CudaGpuTrace::NAME)])
@@ -382,22 +465,6 @@ fn main() {
             ]);
         let paired_duration_summary = get_gpu_duration_summary(concurrent_user_kernels.clone());
 
-        let queue_overhead_data = api_data
-            .clone()
-            .join(
-                gpu_data.clone(),
-                [col(CudaApiTrace::CORR_ID)],
-                [col(CudaGpuTrace::CORR_ID)],
-                JoinArgs::new(JoinType::Inner),
-            )
-            .with_column((col("Start (ns)_right") - col("Start (ns)")).alias(LAUNCH_LATENCY_STR))
-            .select([
-                col("Name").alias("Api Name"),
-                col("Name_right").alias("Gpu Name"),
-                col(CudaApiTrace::CORR_ID),
-                col(LAUNCH_LATENCY_STR),
-            ]);
-
         let duration_slowdown_summary = paired_duration_summary
             .clone()
             .join(
@@ -433,29 +500,92 @@ fn main() {
             ]);
         pair_duration_change_rows.push(duration_slowdown_summary.clone());
 
+        let system_latency_data = api_data
+            .clone()
+            .filter(
+                (col(CudaApiTrace::NAME).eq(lit("cuKernelGetName")))
+                    .or(col(CudaApiTrace::NAME).eq(lit("cudaLaunchKernel"))),
+            )
+            .join(
+                gpu_data.clone(),
+                [col(CudaApiTrace::CORR_ID)],
+                [col(CudaGpuTrace::CORR_ID)],
+                JoinArgs::new(JoinType::Left),
+            )
+            .rename(
+                [
+                    format!("{}_right", CudaGpuTrace::NAME),
+                    format!("{}_right", CudaGpuTrace::END),
+                ],
+                ["Kernel Name", "Kernel End"],
+                true,
+            )
+            .sort([CudaApiTrace::CORR_ID], SortMultipleOptions::default())
+            .with_columns_seq([
+                col("Kernel Name").fill_null_with_strategy(FillNullStrategy::Backward(None)),
+                col("Kernel Name")
+                    .cum_count(false)
+                    .over(["Kernel Name"])
+                    .alias("Instance ID"),
+            ])
+            .filter(col("Instance ID").gt(lit(1)))
+            .with_column(col("Instance ID") - lit(1))
+            .group_by_stable([col("Instance ID"), col("Kernel Name")])
+            .agg([
+                col(CudaApiTrace::START).min().alias("Kernel Frame Start"),
+                col("Kernel End").max().alias("Kernel Frame End"),
+            ])
+            .with_columns([
+                col("Kernel Frame End")
+                    .max()
+                    .over(["Instance ID"])
+                    .alias("Frame End"),
+                col("Kernel Frame Start")
+                    .min()
+                    .over(["Instance ID"])
+                    .alias("Frame Start"),
+            ])
+            .with_columns([
+                (col("Frame End") - col("Frame Start")).alias("System Latency"),
+                (col("Kernel Frame End") - col("Kernel Frame Start")).alias("Kernel Latency"),
+                lit(cuda_config.get_frame_budget().duration.as_nanos()).alias("Frame Allowance"),
+            ])
+            .with_columns([
+                col("System Latency")
+                    .gt(col("Frame Allowance"))
+                    .alias("System Missed Deadline"),
+                (col("System Latency").cast(DataType::Float64)
+                    / col("Frame Allowance").cast(DataType::Float64))
+                .alias("System Frame Usage"),
+                col("Kernel Latency")
+                    .gt(col("Frame Allowance"))
+                    .alias("Kernel Missed Deadline"),
+                (col("Kernel Latency").cast(DataType::Float64)
+                    / col("Frame Allowance").cast(DataType::Float64))
+                .alias("Kernel Frame Usage"),
+            ]);
+
         let [
             final_executions_data,
-            queue_overhead_data,
             concurrent_user_kernels,
             kernel_count_summary,
             paired_duration_summary,
             duration_slowdown_summary,
+            system_latency_data,
         ] = collect_all_array([
             final_executions_data,
-            queue_overhead_data,
             concurrent_user_kernels,
             kernel_count_summary,
             paired_duration_summary,
             duration_slowdown_summary,
+            system_latency_data,
         ])
         .unwrap();
 
         let calc_end = std::time::Instant::now();
 
-        println!(
-            "Queue Launch Overhead: {}",
-            queue_overhead_data.head(Some(10))
-        );
+        println!("API DATA: {}", system_latency_data);
+
         // println!("{}", final_executions_data);
         // println!(
         //     "Concurrent kernel [Head 5]: {}",

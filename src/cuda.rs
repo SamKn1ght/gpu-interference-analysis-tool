@@ -52,6 +52,12 @@ impl CudaConfig {
         }
         has_error
     }
+    pub fn get_frame_budget(&self) -> Delay {
+        self.frame_budget.clone().unwrap_or(Delay {
+            duration: Duration::from_secs(0),
+            method: DelayMethod::Busy,
+        })
+    }
     fn default_iterations() -> u32 {
         50
     }
@@ -149,14 +155,14 @@ pub struct FunctionArg {
     pub datatype: String,
 }
 
-#[derive(serde::Deserialize, Debug)]
+#[derive(serde::Deserialize, Debug, Clone)]
 pub struct Delay {
     #[serde(with = "humantime_serde")]
     pub duration: Duration,
     pub method: DelayMethod,
 }
 
-#[derive(serde::Deserialize, Debug, PartialEq, Eq)]
+#[derive(serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum DelayMethod {
     Busy,
     Sleep,

@@ -22,6 +22,14 @@ int main() {
 
     setup(&data);
 
+    {% for kernel in pair.kernels -%}
+    {{ kernel.name }}<<<{{ kernel.blocks }}, {{ kernel.threads }}, {{ kernel.shared_memory_bytes }}, {{ kernel.stream }}>>>(
+        {%- for arg in kernel.args -%}
+        data.{% if arg.datatype.ends_with('*') %}d_{% endif %}{{ arg.name }}{% if !loop.last %}, {% endif %}
+        {%- endfor -%}
+    );
+    {% endfor %}
+
     {% for stream in pair.streams %}
     cudaStreamSynchronize({{ stream.name }});
     {% endfor %}

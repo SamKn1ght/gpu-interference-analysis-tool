@@ -92,6 +92,27 @@ pub fn get_gpu_duration_summary(frame: LazyFrame) -> LazyFrame {
         ])
 }
 
+pub fn get_system_latency_summary(frame: LazyFrame) -> LazyFrame {
+    frame
+        .clone()
+        .group_by([col("Kernel Name")])
+        .agg([
+            col("Missed Deadline").sum().alias("Missed Deadlines"),
+            col("System Latency").mean().alias("System Latency Mean"),
+            col("System Latency")
+                .median()
+                .alias("System Latency Median"),
+            col("System Latency")
+                .std(1)
+                .alias("System Latency Std. Dev"),
+            col("System Latency")
+                .quantile(lit(0.99), QuantileMethod::Linear)
+                .alias("System Latency 99%"),
+            col("System Latency").max().alias("System Latency Max"),
+        ])
+        .rename(["Kernel Name"], [CudaApiTrace::NAME], true)
+}
+
 pub fn lazy_load_api_trace_dataframe(path: &Path) -> Result<LazyFrame, Box<dyn Error>> {
     Ok(LazyCsvReader::new(PlRefPath::try_from_path(path)?)
         .with_schema(Some(Arc::new(CudaApiTrace::get_schema())))
@@ -114,7 +135,7 @@ pub fn lazy_load_gpu_trace_dataframe(path: &Path) -> Result<LazyFrame, Box<dyn E
             col(CudaApiTrace::DURATION).cast(DataType::Duration(TimeUnit::Nanoseconds)),
         ])
         .with_columns([
-            (col(CudaApiTrace::START) + col(CudaApiTrace::DURATION)).alias(CudaApiTrace::END)
+            (col(CudaGpuTrace::START) + col(CudaGpuTrace::DURATION)).alias(CudaGpuTrace::END)
         ]))
 }
 
