@@ -350,6 +350,8 @@ fn main() {
 
     let mut pair_duration_change_rows =
         Vec::with_capacity(&cuda_config.kernels.len() * (&cuda_config.kernels.len() - 1) / 2);
+    let mut pair_system_latency_rows =
+        Vec::with_capacity(&cuda_config.kernels.len() * (&cuda_config.kernels.len() - 1) / 2);
     for pair in PairedKernelView::iter_unique_kernel_pairs(&cuda_config) {
         // Generate files
         let runner_generator = PairedRunner {
@@ -379,23 +381,6 @@ fn main() {
         let api_data = lazy_load_api_trace_dataframe(&api_trace_file).unwrap();
 
         let kernel_names_series = Series::new("Kernel Names".into(), pair.get_kernel_names());
-        // let single_execution_duration_stats = gpu_data
-        //     .clone()
-        //     .filter(col(CudaGpuTrace::NAME).eq(lit(kernel.name.clone())))
-        //     .sort([CudaGpuTrace::CORR_ID], SortMultipleOptions::default())
-        //     .with_row_index("Instance ID", None)
-        //     .filter(col("Instance ID").gt_eq(1));
-
-        // .sort([CudaApiTrace::CORR_ID], SortMultipleOptions::default())
-        // .with_columns_seq([
-        //     col("Kernel Name").fill_null_with_strategy(FillNullStrategy::Backward(None)),
-        //     col("Kernel Name")
-        //         .cum_count(false)
-        //         .over(["Kernel Name"])
-        //         .alias("Instance ID"),
-        // ])
-        // .filter(col("Instance ID").gt(lit(1)))
-        // .with_column(col("Instance ID") - lit(1))
         let user_kernels_filtered = gpu_data
             .clone()
             .filter(col(CudaGpuTrace::NAME).is_in(lit(kernel_names_series).implode(), false))
@@ -553,7 +538,7 @@ fn main() {
             .with_columns([
                 col("System Latency")
                     .gt(col("Frame Allowance"))
-                    .alias("System Missed Deadline"),
+                    .alias("Missed Deadline"),
                 (col("System Latency").cast(DataType::Float64)
                     / col("Frame Allowance").cast(DataType::Float64))
                 .alias("System Frame Usage"),
@@ -564,6 +549,18 @@ fn main() {
                     / col("Frame Allowance").cast(DataType::Float64))
                 .alias("Kernel Frame Usage"),
             ]);
+        let system_latency_summary = get_system_latency_summary(system_latency_data.clone())
+            .with_columns([
+                lit(pair.get_kernel_names()[0]).alias("Kernel A"),
+                lit(pair.get_kernel_names()[1]).alias("Kernel B"),
+            ])
+            .with_column(
+                when(col(CudaApiTrace::NAME).eq(col("Kernel A")))
+                    .then(col("Kernel B"))
+                    .otherwise(col("Kernel A"))
+                    .alias("Opposing Kernel"),
+            );
+        pair_system_latency_rows.push(system_latency_summary.clone());
 
         let [
             final_executions_data,
@@ -572,6 +569,7 @@ fn main() {
             paired_duration_summary,
             duration_slowdown_summary,
             system_latency_data,
+            system_latency_summary,
         ] = collect_all_array([
             final_executions_data,
             concurrent_user_kernels,
@@ -579,12 +577,13 @@ fn main() {
             paired_duration_summary,
             duration_slowdown_summary,
             system_latency_data,
+            system_latency_summary,
         ])
         .unwrap();
 
         let calc_end = std::time::Instant::now();
 
-        println!("API DATA: {}", system_latency_data);
+        println!("API DATA: {}", system_latency_summary);
 
         // println!("{}", final_executions_data);
         // println!(
@@ -596,6 +595,83 @@ fn main() {
         println!("Duration Slowdown Summary: {}", duration_slowdown_summary);
         debug!("Polars calculations took {:#?}", calc_end - calc_start);
     }
+
+    let paired_system_latency_summary = concat(pair_system_latency_rows, UnionArgs::default())
+        .unwrap()
+        .join(
+            system_latency_summaries
+                .clone()
+                .select([
+                    col(CudaApiTrace::NAME),
+                    col("System Latency Mean"),
+                    col("System Latency 99%"),
+                ])
+                .rename(
+                    [
+                        CudaApiTrace::NAME,
+                        "System Latency Mean",
+                        "System Latency 99%",
+                    ],
+                    ["Kernel A", "Kernel A Mean Latency", "Kernel A 99% Latency"],
+                    true,
+                ),
+            [col("Kernel A")],
+            [col("Kernel A")],
+            JoinArgs::new(JoinType::Left),
+        )
+        .join(
+            system_latency_summaries
+                .clone()
+                .select([
+                    col(CudaApiTrace::NAME),
+                    col("System Latency Mean"),
+                    col("System Latency 99%"),
+                ])
+                .rename(
+                    [
+                        CudaApiTrace::NAME,
+                        "System Latency Mean",
+                        "System Latency 99%",
+                    ],
+                    ["Kernel B", "Kernel B Mean Latency", "Kernel B 99% Latency"],
+                    true,
+                ),
+            [col("Kernel B")],
+            [col("Kernel B")],
+            JoinArgs::new(JoinType::Left),
+        )
+        .with_columns([
+            (col("Kernel A Mean Latency") + col("Kernel B Mean Latency"))
+                .alias("Mean Sequential Latency"),
+            (col("Kernel A 99% Latency") + col("Kernel B 99% Latency"))
+                .alias("99% Sequential Latency"),
+        ])
+        .group_by([CudaApiTrace::NAME, "Opposing Kernel"])
+        .agg([
+            col("Mean Sequential Latency").first_non_null(),
+            col("99% Sequential Latency").first_non_null(),
+            col("System Latency Mean").first_non_null(),
+            col("System Latency 99%").first_non_null(),
+        ])
+        .with_columns([
+            (col("Mean Sequential Latency").cast(DataType::Float64)
+                / col("System Latency Mean").cast(DataType::Float64))
+            .alias("Mean Concurrency Efficiency"),
+            (col("99% Sequential Latency").cast(DataType::Float64)
+                / col("System Latency 99%").cast(DataType::Float64))
+            .alias("99% Concurrency Efficiency"),
+        ]);
+    let pivoted_mean_system_latency_summary = get_pivoted_table_for_attribute(
+        paired_system_latency_summary.clone(),
+        "Mean Concurrency Efficiency",
+        "Kernel",
+    );
+    let pivoted_p99_system_latency_summary = get_pivoted_table_for_attribute(
+        paired_system_latency_summary.clone(),
+        "99% Concurrency Efficiency",
+        "Kernel",
+    );
+
     let paired_kernel_duration_summary = concat(pair_duration_change_rows, UnionArgs::default())
         .unwrap()
         .with_columns([
@@ -719,6 +795,8 @@ fn main() {
         mut pivoted_weighted_sensitivity_scores,
         mut pivoted_weighted_aggression_scores,
         mut final_kernel_scorings,
+        mut pivoted_mean_system_latency_summary,
+        mut pivoted_p99_system_latency_summary,
     ] = collect_all_array([
         get_pivoted_table_for_attribute(
             sensitivity_scores.clone(),
@@ -738,6 +816,8 @@ fn main() {
         final_kernel_scorings
             .clone()
             .sort([CudaGpuTrace::NAME], SortMultipleOptions::default()),
+        pivoted_mean_system_latency_summary.clone(),
+        pivoted_p99_system_latency_summary.clone(),
     ])
     .unwrap();
     let end = std::time::Instant::now();
@@ -771,6 +851,16 @@ fn main() {
     write_to_csv(
         &global_config.new_output_file("kernel_score_summary.csv"),
         &mut final_kernel_scorings,
+    )
+    .unwrap();
+    write_to_csv(
+        &global_config.new_output_file("concurrency_efficiency_of_means.csv"),
+        &mut pivoted_mean_system_latency_summary,
+    )
+    .unwrap();
+    write_to_csv(
+        &global_config.new_output_file("concurrency_efficiency_of_p99.csv"),
+        &mut pivoted_p99_system_latency_summary,
     )
     .unwrap();
 }

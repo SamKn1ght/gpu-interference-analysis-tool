@@ -1,5 +1,5 @@
 frame_budget:
-  duration: "7900us"
+  duration: "33ms"
   method: "Busy"
 kernels:
   - name: "vec_add"
