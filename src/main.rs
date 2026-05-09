@@ -125,7 +125,11 @@ where
             if out.status.success() {
                 info!("Compiled binary {}", binary_path.to_string_lossy())
             } else {
-                error!("Error in NVCC: {}", String::from_utf8_lossy(&out.stderr));
+                error!(
+                    "Error in NVCC stdout: {}, stderr: {}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
             }
         }
         Err(e) => error!("Error in NVCC: {e}"),
@@ -149,7 +153,11 @@ fn run_nsys(binary_path: &Path, output_file: &Path, trial_name: &str) {
             if out.status.success() {
                 info!("Nsys completed for {}", trial_name);
             } else {
-                error!("Error from NSYS: {}", String::from_utf8_lossy(&out.stderr));
+                error!(
+                    "Error in NSYS stdout: {}, stderr: {}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
             }
         }
         Err(e) => error!("Error running NSYS: {e}"),
@@ -173,7 +181,8 @@ fn get_nsys_trace_paths(nsys_report_file: &Path, trial_name: &str) -> (PathBuf, 
                 info!("Nsys stats completed for {}", trial_name);
             } else {
                 error!(
-                    "Error from NSYS stats: {}",
+                    "Error in NSYS stats stdout: {}, stderr: {}",
+                    String::from_utf8_lossy(&out.stdout),
                     String::from_utf8_lossy(&out.stderr)
                 );
             }
@@ -246,7 +255,11 @@ fn run_ncu(binary_path: &Path, output_file: &Path, trial_name: &str) {
                 let _ = writer.write(out_slice);
                 let _ = writer.flush();
             } else {
-                error!("Error from NCU: {}", String::from_utf8_lossy(&out.stdout));
+                error!(
+                    "Error in NCU stdout: {}, stderr: {}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
             }
         }
         Err(e) => {
