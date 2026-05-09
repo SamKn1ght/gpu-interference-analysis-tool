@@ -14,9 +14,9 @@ use crate::{
     config::{Config, ConfigBuilder},
     cuda::{CudaConfig, DelayMethod, Kernel, Stream},
     data::{
-        CudaApiTrace, CudaGpuTrace, collect_all_array, get_gpu_duration_summary,
+        CudaApiTrace, CudaGpuTrace, NcuData, collect_all_array, get_gpu_duration_summary,
         get_pivoted_table_for_attribute, get_system_latency_summary, lazy_load_api_trace_dataframe,
-        lazy_load_gpu_trace_dataframe, write_to_csv,
+        lazy_load_gpu_trace_dataframe, lazy_load_ncu_dataframe, pivot_ncu_data, write_to_csv,
     },
     views::{GpuPipelineView, PairedKernelView},
 };
@@ -197,6 +197,63 @@ fn get_nsys_trace_paths(nsys_report_file: &Path, trial_name: &str) -> (PathBuf, 
     ));
     (api_trace_file, gpu_trace_file)
 }
+/// Runs the ncu command for a singular kernel execution `trial_name` returning the CSV file from
+/// the stdout as a cursor if the command is successful
+#[inline(never)]
+fn run_ncu(binary_path: &Path, output_file: &Path, trial_name: &str) {
+    let mut ncu_command = process::Command::new("ncu");
+    ncu_command
+        .args([
+            "--section",
+            "SpeedOfLight",
+            "--section",
+            "Occupancy",
+            "--section",
+            "MemoryWorkloadAnalysis",
+            "--apply-rules",
+            "no",
+            "-c",
+            "1",
+            "-s",
+            "1",
+            "-k",
+            trial_name,
+            "--csv",
+            "--page=details",
+        ])
+        .arg("-o")
+        .arg(output_file)
+        .arg(binary_path);
+
+    match ncu_command.output() {
+        Ok(out) => {
+            if out.status.success() {
+                info!("Ncu completed for {}", trial_name);
+                let output = out.stdout;
+                let mut bytes_to_skip = 0;
+
+                for line in output.split(|x| *x == b'\n') {
+                    if line.first() == Some(&b'=') {
+                        bytes_to_skip += line.len() + 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                let out_slice = &output[bytes_to_skip..];
+                let file = fs::File::create(output_file).unwrap();
+                let mut writer = BufWriter::new(file);
+                let _ = writer.write(out_slice);
+                let _ = writer.flush();
+            } else {
+                error!("Error from NCU: {}", String::from_utf8_lossy(&out.stdout));
+            }
+        }
+        Err(e) => {
+            error!("Error running NCU: {e}");
+        }
+    }
+}
 
 fn main() {
     // Check for loggin env var and default it if it is not present
@@ -258,6 +315,7 @@ fn main() {
     let baseline_path = global_config.new_output_file("baseline");
     let mut gpu_kernel_rows = Vec::with_capacity(cuda_config.kernels.len());
     let mut api_data_rows = Vec::with_capacity(cuda_config.kernels.len());
+    let mut ncu_data_rows = Vec::with_capacity(cuda_config.kernels.len());
     for kernel in &cuda_config.kernels {
         let runner_generator = SingleRunner {
             config: &cuda_config,
@@ -274,7 +332,15 @@ fn main() {
         );
 
         let nsys_output_file = single_dir.join("report");
+        let ncu_output_file = single_dir.join("profile.csv");
         run_nsys(&binary_path, &nsys_output_file, &kernel.name);
+        run_ncu(&binary_path, &ncu_output_file, &kernel.name);
+
+        let ncu_dataframe = lazy_load_ncu_dataframe(&ncu_output_file).unwrap();
+        println!("NCU Data: {}", ncu_dataframe.clone().collect().unwrap());
+        let pivoted_ncu_dataframe = pivot_ncu_data(ncu_dataframe.clone());
+        ncu_data_rows.push(pivoted_ncu_dataframe.clone());
+
         let (api_trace_file, gpu_trace_file) =
             get_nsys_trace_paths(&nsys_output_file, &kernel.name);
 
@@ -337,6 +403,7 @@ fn main() {
     }
     let duration_summaries = concat(&gpu_kernel_rows, UnionArgs::default()).unwrap();
     let system_latency_summaries = concat(&api_data_rows, UnionArgs::default()).unwrap();
+    let ncu_profile_data = concat(&ncu_data_rows, UnionArgs::default()).unwrap();
     println!(
         "Duration Summary: {}",
         duration_summaries.clone().collect().unwrap()
@@ -345,12 +412,18 @@ fn main() {
         "System Latency Summary: {}",
         system_latency_summaries.clone().collect().unwrap()
     );
+    println!(
+        "Ncu Profiling Data: {}",
+        ncu_profile_data.clone().collect().unwrap()
+    );
 
     // Generate runner files for pairings
 
     let mut pair_duration_change_rows =
         Vec::with_capacity(&cuda_config.kernels.len() * (&cuda_config.kernels.len() - 1) / 2);
     let mut pair_system_latency_rows =
+        Vec::with_capacity(&cuda_config.kernels.len() * (&cuda_config.kernels.len() - 1) / 2);
+    let mut pair_ncu_profile_rows =
         Vec::with_capacity(&cuda_config.kernels.len() * (&cuda_config.kernels.len() - 1) / 2);
     for pair in PairedKernelView::iter_unique_kernel_pairs(&cuda_config) {
         // Generate files
@@ -379,6 +452,108 @@ fn main() {
 
         let gpu_data = lazy_load_gpu_trace_dataframe(&gpu_trace_file).unwrap();
         let api_data = lazy_load_api_trace_dataframe(&api_trace_file).unwrap();
+
+        let sum_contested_resource_names = [
+            "Sum Bandwidth",
+            "Sum Mem Busy",
+            "Sum Compute Throughput",
+            "Sum L2 Throughput",
+            "Sum L1 Throughput",
+        ];
+        let sum_contested_resource_display_names = [
+            "Memory Bandwidth",
+            "Memory Busy",
+            "Compute Units",
+            "L2 Cache",
+            "L1 Cache",
+        ];
+        let ncu_kernels_profiles = df!(
+            "Kernel Name" => [pair.get_kernel_names()[0], pair.get_kernel_names()[1]],
+            "Opposing Kernel" => [pair.get_kernel_names()[1], pair.get_kernel_names()[0]])
+        .unwrap()
+        .lazy()
+        .join(
+            ncu_profile_data.clone(),
+            [col("Kernel Name")],
+            [col(NcuData::KERNEL_NAME)],
+            JoinArgs::new(JoinType::Inner),
+        )
+        .join(
+            ncu_profile_data.clone(),
+            [col("Opposing Kernel")],
+            [col(NcuData::KERNEL_NAME)],
+            JoinArgs::new(JoinType::Inner),
+        )
+        .with_columns([
+            (col("Achieved Occupancy") + col("Achieved Occupancy_right")).alias("Sum Occupancy"),
+            (col("Max Bandwidth") + col("Max Bandwidth_right")).alias("Sum Bandwidth"),
+            (col("Mem Busy") + col("Mem Busy_right")).alias("Sum Mem Busy"),
+            (col("Compute (SM) Throughput") + col("Compute (SM) Throughput_right"))
+                .alias("Sum Compute Throughput"),
+            (col("L2 Cache Throughput") + col("L2 Cache Throughput_right"))
+                .alias("Sum L2 Throughput"),
+            (col("L1/TEX Cache Throughput") + col("L1/TEX Cache Throughput_right"))
+                .alias("Sum L1 Throughput"),
+        ])
+        .with_columns([
+            concat_list([
+                when(col("Sum Occupancy").gt(90.0))
+                    .then(lit("Occupancy"))
+                    .otherwise(lit(NULL)),
+                when(col("Sum Bandwidth").gt(90.0))
+                    .then(lit("Memory Bandwidth"))
+                    .otherwise(lit(NULL)),
+                when(col("Sum Mem Busy").gt(90.0))
+                    .then(lit("Memory Busy"))
+                    .otherwise(lit(NULL)),
+                when(col("Sum Compute Throughput").gt(90.0))
+                    .then(lit("Compute Units"))
+                    .otherwise(lit(NULL)),
+                when(col("Sum L2 Throughput").gt(90.0))
+                    .then(lit("L2 Cache"))
+                    .otherwise(lit(NULL)),
+                when(col("Sum L1 Throughput").gt(90.0))
+                    .then(lit("L1 Cache"))
+                    .otherwise(lit(NULL)),
+            ])
+            .unwrap()
+            .list()
+            .eval(col("").drop_nulls())
+            .alias("Contested Resources"),
+            concat_list(
+                sum_contested_resource_names
+                    .iter()
+                    .map(|s| col(*s))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+            .list()
+            .arg_max()
+            .alias("Max Contention Index"),
+        ])
+        .with_column(
+            sum_contested_resource_names
+                .iter()
+                .enumerate()
+                .fold(
+                    when(lit(false))
+                        .then(lit(NULL))
+                        .when(lit(false))
+                        .then(lit(NULL)),
+                    |acc, (i, _label)| {
+                        acc.when(col("Max Contention Index").eq(lit(i as u32)))
+                            .then(lit(sum_contested_resource_display_names[i]))
+                    },
+                )
+                .otherwise(lit(NULL))
+                .alias("Main Bottleneck"),
+        );
+        pair_ncu_profile_rows.push(ncu_kernels_profiles.clone());
+
+        println!(
+            "Joined pair ncu: {}",
+            ncu_kernels_profiles.clone().collect().unwrap()
+        );
 
         let kernel_names_series = Series::new("Kernel Names".into(), pair.get_kernel_names());
         let user_kernels_filtered = gpu_data
@@ -789,6 +964,9 @@ fn main() {
         [col("Opposing Kernel")],
         JoinArgs::new(JoinType::Inner),
     );
+    let full_ncu_profiling_pairs = concat(pair_ncu_profile_rows, UnionArgs::default())
+        .unwrap()
+        .rename(["Kernel Name"], [CudaGpuTrace::NAME], true);
     let start = std::time::Instant::now();
     let [
         mut pivoted_naive_impact_scores,
@@ -797,6 +975,8 @@ fn main() {
         mut final_kernel_scorings,
         mut pivoted_mean_system_latency_summary,
         mut pivoted_p99_system_latency_summary,
+        mut pivoted_contested_resources,
+        mut pivoted_most_contested_resource,
     ] = collect_all_array([
         get_pivoted_table_for_attribute(
             sensitivity_scores.clone(),
@@ -818,6 +998,18 @@ fn main() {
             .sort([CudaGpuTrace::NAME], SortMultipleOptions::default()),
         pivoted_mean_system_latency_summary.clone(),
         pivoted_p99_system_latency_summary.clone(),
+        get_pivoted_table_for_attribute(
+            full_ncu_profiling_pairs
+                .clone()
+                .with_column(col("Contested Resources").list().join(lit(";"), true)),
+            "Contested Resources",
+            "Name",
+        ),
+        get_pivoted_table_for_attribute(
+            full_ncu_profiling_pairs.clone(),
+            "Main Bottleneck",
+            "Name",
+        ),
     ])
     .unwrap();
     let end = std::time::Instant::now();
@@ -831,6 +1023,8 @@ fn main() {
         "Pivoted Weighted Aggression: {}",
         pivoted_weighted_aggression_scores
     );
+    println!("Contested Resources: {}", pivoted_contested_resources);
+    println!("Main Bottlenecks: {}", pivoted_most_contested_resource);
     debug!("Pivoting took {:#?}", end - start);
 
     write_to_csv(
@@ -863,6 +1057,14 @@ fn main() {
         &mut pivoted_p99_system_latency_summary,
     )
     .unwrap();
+    write_to_csv(
+        &global_config.new_output_file("contested_resources.csv"),
+        &mut pivoted_contested_resources,
+    )
+    .unwrap();
+    write_to_csv(
+        &global_config.new_output_file("main_bottlenecks.csv"),
+        &mut pivoted_most_contested_resource,
+    )
+    .unwrap();
 }
-
-const LAUNCH_LATENCY_STR: &str = "Launch Latency (ns)";

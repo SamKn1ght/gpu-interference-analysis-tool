@@ -1,8 +1,4 @@
-use std::{
-    error::Error,
-    fs::File,
-    path::{Path, PathBuf},
-};
+use std::{error::Error, fs::File, path::Path};
 
 use polars::prelude::*;
 
@@ -67,6 +63,36 @@ pub fn get_pivoted_table_for_attribute(
             SortMultipleOptions::default(),
         )
         .rename([CudaGpuTrace::NAME], [name_column_alias], true)
+}
+
+pub fn pivot_ncu_data(frame: LazyFrame) -> LazyFrame {
+    frame.clone().pivot(
+        Selector::ByName {
+            names: Arc::new([PlSmallStr::from_static(NcuData::METRIC_NAME)]),
+            strict: true,
+        },
+        Arc::new(
+            frame
+                .select([col(NcuData::METRIC_NAME)])
+                .sort(
+                    [PlSmallStr::from_static(NcuData::METRIC_NAME)],
+                    SortMultipleOptions::default(),
+                )
+                .collect()
+                .unwrap(),
+        ),
+        Selector::ByName {
+            names: Arc::new([PlSmallStr::from_static(NcuData::KERNEL_NAME)]),
+            strict: true,
+        },
+        Selector::ByName {
+            names: Arc::new([PlSmallStr::from_static(NcuData::METRIC_VALUE)]),
+            strict: true,
+        },
+        element().first(),
+        true,
+        PlSmallStr::from_static(""),
+    )
 }
 
 pub fn get_gpu_duration_summary(frame: LazyFrame) -> LazyFrame {
@@ -137,6 +163,32 @@ pub fn lazy_load_gpu_trace_dataframe(path: &Path) -> Result<LazyFrame, Box<dyn E
         .with_columns([
             (col(CudaGpuTrace::START) + col(CudaGpuTrace::DURATION)).alias(CudaGpuTrace::END)
         ]))
+}
+
+pub fn lazy_load_ncu_dataframe(path: &Path) -> Result<LazyFrame, Box<dyn Error>> {
+    let selected_metrics = Series::new(
+        PlSmallStr::from_static("Selected Metrics"),
+        vec![
+            "Compute (SM) Throughput",
+            "L1/TEX Cache Throughput",
+            "L2 Cache Throughput",
+            "Mem Busy",
+            "Max Bandwidth",
+            "Achieved Occupancy",
+        ],
+    );
+    Ok(LazyCsvReader::new(PlRefPath::try_from_path(path)?)
+        .with_schema(Some(Arc::new(NcuData::get_schema())))
+        .finish()?
+        .filter(col(NcuData::METRIC_NAME).is_in(lit(selected_metrics).implode(), true))
+        .filter(col(NcuData::METRIC_UNIT).eq(lit("%")))
+        .select([
+            col(NcuData::KERNEL_NAME),
+            col(NcuData::METRIC_NAME),
+            col(NcuData::METRIC_UNIT),
+            col(NcuData::METRIC_VALUE),
+        ])
+        .with_column(col(NcuData::METRIC_VALUE).cast(DataType::Float64)))
 }
 
 trait ToSchema {
@@ -221,6 +273,46 @@ impl ToSchema for CudaGpuTrace {
             Field::new(Self::GREEN_CONTEXT.into(), DataType::UInt32),
             Field::new(Self::STREAM.into(), DataType::UInt32),
             Field::new(Self::NAME.into(), DataType::String),
+        ])
+    }
+}
+
+pub struct NcuData;
+impl NcuData {
+    pub const ID: &str = "ID";
+    pub const PID: &str = "Process ID";
+    pub const PROCESS_NAME: &str = "Process Name";
+    pub const HOST_NAME: &str = "Host Name";
+    pub const KERNEL_NAME: &str = "Kernel Name";
+    pub const CONTEXT: &str = "Context";
+    pub const STREAM: &str = "Stream";
+    pub const BLOCK_SIZE: &str = "Block Size";
+    pub const GRID_SIZE: &str = "Grid Size";
+    pub const DEVICE: &str = "Device";
+    pub const COMPUTE_CAPACITY: &str = "Compute Capacity";
+    pub const SECTION_NAME: &str = "Section Name";
+    pub const METRIC_NAME: &str = "Metric Name";
+    pub const METRIC_UNIT: &str = "Metric Unit";
+    pub const METRIC_VALUE: &str = "Metric Value";
+}
+impl ToSchema for NcuData {
+    fn get_schema() -> Schema {
+        Schema::from_iter(vec![
+            Field::new(Self::ID.into(), DataType::Int32),
+            Field::new(Self::PID.into(), DataType::Int32),
+            Field::new(Self::PROCESS_NAME.into(), DataType::String),
+            Field::new(Self::HOST_NAME.into(), DataType::String),
+            Field::new(Self::KERNEL_NAME.into(), DataType::String),
+            Field::new(Self::CONTEXT.into(), DataType::UInt32),
+            Field::new(Self::STREAM.into(), DataType::UInt32),
+            Field::new(Self::BLOCK_SIZE.into(), DataType::String),
+            Field::new(Self::GRID_SIZE.into(), DataType::String),
+            Field::new(Self::DEVICE.into(), DataType::String),
+            Field::new(Self::COMPUTE_CAPACITY.into(), DataType::String),
+            Field::new(Self::SECTION_NAME.into(), DataType::String),
+            Field::new(Self::METRIC_NAME.into(), DataType::String),
+            Field::new(Self::METRIC_UNIT.into(), DataType::String),
+            Field::new(Self::METRIC_VALUE.into(), DataType::String),
         ])
     }
 }
