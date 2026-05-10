@@ -19,3 +19,4 @@ log = "0.4.29"
 polars = { version = "0.53.0", features = ["lazy", "csv", "dtype-full", "temporal", "fmt", "strings", "is_in", "pivot", "polars-ops", "cum_agg"]}
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yml = "0.0.12"
+which = "8.0.2"

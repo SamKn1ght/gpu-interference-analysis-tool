@@ -27,6 +27,7 @@ mod data;
 mod views;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
+static SUDO: OnceLock<bool> = OnceLock::new();
 
 const KERNEL_HEADER_SUFFIX: &str = "generated_kernels.h";
 const RUNNER_FILE_SUFFIX: &str = "generated_runner.cu";
@@ -46,6 +47,9 @@ struct Args {
     /// Output directory
     #[arg(short, long = "out")]
     output_dir: Option<PathBuf>,
+    /// Run the NCU command with sudo
+    #[arg(short, long = "sudo")]
+    sudo: bool,
 }
 
 #[derive(Template)]
@@ -210,7 +214,18 @@ fn get_nsys_trace_paths(nsys_report_file: &Path, trial_name: &str) -> (PathBuf, 
 /// the stdout as a cursor if the command is successful
 #[inline(never)]
 fn run_ncu(binary_path: &Path, output_file: &Path, trial_name: &str) {
-    let mut ncu_command = process::Command::new("ncu");
+    let ncu_binary = which::which("ncu").unwrap();
+    let mut ncu_base_command = if *SUDO.get().expect("SUDO arg should have been parsed") {
+        process::Command::new("sudo")
+    } else {
+        process::Command::new(&ncu_binary)
+    };
+    let ncu_command = if *SUDO.get().expect("SUDO arg should have been parsed") {
+        ncu_base_command.arg(&ncu_binary)
+    } else {
+        &mut ncu_base_command
+    };
+
     ncu_command
         .args([
             "--section",
@@ -290,6 +305,7 @@ fn main() {
             .build()
             .expect("Fields should have been validated by this point"),
     );
+    let _ = SUDO.set(args.sudo);
 
     let global_config = CONFIG.get().expect("Config should be intitialised");
     let cuda_config = {
