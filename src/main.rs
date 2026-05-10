@@ -443,6 +443,12 @@ fn main() {
     } else {
         DataFrame::new(0, vec![]).unwrap().lazy()
     };
+    if *FULL.get().unwrap() {
+        let _ = write_to_csv(
+            &global_config.new_output_file("kernel_resource_profiles.csv"),
+            &mut ncu_profile_data.clone().collect().unwrap(),
+        );
+    }
     println!(
         "Ncu Profiling Data: {}",
         ncu_profile_data.clone().collect().unwrap()
