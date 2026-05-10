@@ -114,15 +114,15 @@ void setup(DataPointers* data) {
         data->h_rgb[i * 3 + 2] = (unsigned char)i;
         data->h_gray[i] = (unsigned char)0;
     }
-    // for (int i = 0; i < input_size; i++) {
-    //     data->h_conv_input[i] = (float)i;
-    // }
-    // for (int i = 0; i < kernel_size; i++) {
-    //     data->h_conv_kernel[i] = (float)(10 * i);
-    // }
-    // for (int i = 0; i < output_size; i++) {
-    //     data->h_conv_output[i] = (float)0;
-    // }
+    for (int i = 0; i < input_size; i++) {
+        data->h_conv_input[i] = (float)i;
+    }
+    for (int i = 0; i < kernel_size; i++) {
+        data->h_conv_kernel[i] = (float)(10 * i);
+    }
+    for (int i = 0; i < output_size; i++) {
+        data->h_conv_output[i] = (float)0;
+    }
 
     cudaMemcpyAsync(data->d_a, data->h_a, bytes, cudaMemcpyHostToDevice);
     cudaMemcpyAsync(data->d_b, data->h_b, bytes, cudaMemcpyHostToDevice);
