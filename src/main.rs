@@ -28,6 +28,7 @@ mod views;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 static SUDO: OnceLock<bool> = OnceLock::new();
+static FULL: OnceLock<bool> = OnceLock::new();
 
 const KERNEL_HEADER_SUFFIX: &str = "generated_kernels.h";
 const RUNNER_FILE_SUFFIX: &str = "generated_runner.cu";
@@ -48,8 +49,11 @@ struct Args {
     #[arg(short, long = "out")]
     output_dir: Option<PathBuf>,
     /// Run the NCU command with sudo
-    #[arg(short, long = "sudo")]
+    #[arg(long = "sudo")]
     sudo: bool,
+    /// Run NCU for profiling of each kernel
+    #[arg(short, long = "full")]
+    full: bool,
 }
 
 #[derive(Template)]
@@ -306,6 +310,7 @@ fn main() {
             .expect("Fields should have been validated by this point"),
     );
     let _ = SUDO.set(args.sudo);
+    let _ = FULL.set(args.full);
 
     let global_config = CONFIG.get().expect("Config should be intitialised");
     let cuda_config = {
@@ -363,12 +368,13 @@ fn main() {
         let nsys_output_file = single_dir.join("report");
         let ncu_output_file = single_dir.join("profile.csv");
         run_nsys(&binary_path, &nsys_output_file, &kernel.name);
-        run_ncu(&binary_path, &ncu_output_file, &kernel.name);
-
-        let ncu_dataframe = lazy_load_ncu_dataframe(&ncu_output_file).unwrap();
-        println!("NCU Data: {}", ncu_dataframe.clone().collect().unwrap());
-        let pivoted_ncu_dataframe = pivot_ncu_data(ncu_dataframe.clone());
-        ncu_data_rows.push(pivoted_ncu_dataframe.clone());
+        if *FULL.get().unwrap() {
+            run_ncu(&binary_path, &ncu_output_file, &kernel.name);
+            let ncu_dataframe = lazy_load_ncu_dataframe(&ncu_output_file).unwrap();
+            println!("NCU Data: {}", ncu_dataframe.clone().collect().unwrap());
+            let pivoted_ncu_dataframe = pivot_ncu_data(ncu_dataframe.clone());
+            ncu_data_rows.push(pivoted_ncu_dataframe.clone());
+        }
 
         let (api_trace_file, gpu_trace_file) =
             get_nsys_trace_paths(&nsys_output_file, &kernel.name);
@@ -432,7 +438,15 @@ fn main() {
     }
     let duration_summaries = concat(&gpu_kernel_rows, UnionArgs::default()).unwrap();
     let system_latency_summaries = concat(&api_data_rows, UnionArgs::default()).unwrap();
-    let ncu_profile_data = concat(&ncu_data_rows, UnionArgs::default()).unwrap();
+    let ncu_profile_data = if *FULL.get().unwrap() {
+        concat(&ncu_data_rows, UnionArgs::default()).unwrap()
+    } else {
+        DataFrame::new(0, vec![]).unwrap().lazy()
+    };
+    println!(
+        "Ncu Profiling Data: {}",
+        ncu_profile_data.clone().collect().unwrap()
+    );
     println!(
         "Duration Summary: {}",
         duration_summaries.clone().collect().unwrap()
@@ -440,10 +454,6 @@ fn main() {
     println!(
         "System Latency Summary: {}",
         system_latency_summaries.clone().collect().unwrap()
-    );
-    println!(
-        "Ncu Profiling Data: {}",
-        ncu_profile_data.clone().collect().unwrap()
     );
 
     // Generate runner files for pairings
@@ -482,107 +492,110 @@ fn main() {
         let gpu_data = lazy_load_gpu_trace_dataframe(&gpu_trace_file).unwrap();
         let api_data = lazy_load_api_trace_dataframe(&api_trace_file).unwrap();
 
-        let sum_contested_resource_names = [
-            "Sum Bandwidth",
-            "Sum Mem Busy",
-            "Sum Compute Throughput",
-            "Sum L2 Throughput",
-            "Sum L1 Throughput",
-        ];
-        let sum_contested_resource_display_names = [
-            "Memory Bandwidth",
-            "Memory Busy",
-            "Compute Units",
-            "L2 Cache",
-            "L1 Cache",
-        ];
-        let ncu_kernels_profiles = df!(
+        if *FULL.get().unwrap() {
+            let sum_contested_resource_names = [
+                "Sum Bandwidth",
+                "Sum Mem Busy",
+                "Sum Compute Throughput",
+                "Sum L2 Throughput",
+                "Sum L1 Throughput",
+            ];
+            let sum_contested_resource_display_names = [
+                "Memory Bandwidth",
+                "Memory Busy",
+                "Compute Units",
+                "L2 Cache",
+                "L1 Cache",
+            ];
+            let ncu_kernels_profiles = df!(
             "Kernel Name" => [pair.get_kernel_names()[0], pair.get_kernel_names()[1]],
             "Opposing Kernel" => [pair.get_kernel_names()[1], pair.get_kernel_names()[0]])
-        .unwrap()
-        .lazy()
-        .join(
-            ncu_profile_data.clone(),
-            [col("Kernel Name")],
-            [col(NcuData::KERNEL_NAME)],
-            JoinArgs::new(JoinType::Inner),
-        )
-        .join(
-            ncu_profile_data.clone(),
-            [col("Opposing Kernel")],
-            [col(NcuData::KERNEL_NAME)],
-            JoinArgs::new(JoinType::Inner),
-        )
-        .with_columns([
-            (col("Achieved Occupancy") + col("Achieved Occupancy_right")).alias("Sum Occupancy"),
-            (col("Max Bandwidth") + col("Max Bandwidth_right")).alias("Sum Bandwidth"),
-            (col("Mem Busy") + col("Mem Busy_right")).alias("Sum Mem Busy"),
-            (col("Compute (SM) Throughput") + col("Compute (SM) Throughput_right"))
-                .alias("Sum Compute Throughput"),
-            (col("L2 Cache Throughput") + col("L2 Cache Throughput_right"))
-                .alias("Sum L2 Throughput"),
-            (col("L1/TEX Cache Throughput") + col("L1/TEX Cache Throughput_right"))
-                .alias("Sum L1 Throughput"),
-        ])
-        .with_columns([
-            concat_list([
-                when(col("Sum Occupancy").gt(90.0))
-                    .then(lit("Occupancy"))
-                    .otherwise(lit(NULL)),
-                when(col("Sum Bandwidth").gt(90.0))
-                    .then(lit("Memory Bandwidth"))
-                    .otherwise(lit(NULL)),
-                when(col("Sum Mem Busy").gt(90.0))
-                    .then(lit("Memory Busy"))
-                    .otherwise(lit(NULL)),
-                when(col("Sum Compute Throughput").gt(90.0))
-                    .then(lit("Compute Units"))
-                    .otherwise(lit(NULL)),
-                when(col("Sum L2 Throughput").gt(90.0))
-                    .then(lit("L2 Cache"))
-                    .otherwise(lit(NULL)),
-                when(col("Sum L1 Throughput").gt(90.0))
-                    .then(lit("L1 Cache"))
-                    .otherwise(lit(NULL)),
-            ])
             .unwrap()
-            .list()
-            .eval(col("").drop_nulls())
-            .alias("Contested Resources"),
-            concat_list(
+            .lazy()
+            .join(
+                ncu_profile_data.clone(),
+                [col("Kernel Name")],
+                [col(NcuData::KERNEL_NAME)],
+                JoinArgs::new(JoinType::Inner),
+            )
+            .join(
+                ncu_profile_data.clone(),
+                [col("Opposing Kernel")],
+                [col(NcuData::KERNEL_NAME)],
+                JoinArgs::new(JoinType::Inner),
+            )
+            .with_columns([
+                (col("Achieved Occupancy") + col("Achieved Occupancy_right"))
+                    .alias("Sum Occupancy"),
+                (col("Max Bandwidth") + col("Max Bandwidth_right")).alias("Sum Bandwidth"),
+                (col("Mem Busy") + col("Mem Busy_right")).alias("Sum Mem Busy"),
+                (col("Compute (SM) Throughput") + col("Compute (SM) Throughput_right"))
+                    .alias("Sum Compute Throughput"),
+                (col("L2 Cache Throughput") + col("L2 Cache Throughput_right"))
+                    .alias("Sum L2 Throughput"),
+                (col("L1/TEX Cache Throughput") + col("L1/TEX Cache Throughput_right"))
+                    .alias("Sum L1 Throughput"),
+            ])
+            .with_columns([
+                concat_list([
+                    when(col("Sum Occupancy").gt(90.0))
+                        .then(lit("Occupancy"))
+                        .otherwise(lit(NULL)),
+                    when(col("Sum Bandwidth").gt(90.0))
+                        .then(lit("Memory Bandwidth"))
+                        .otherwise(lit(NULL)),
+                    when(col("Sum Mem Busy").gt(90.0))
+                        .then(lit("Memory Busy"))
+                        .otherwise(lit(NULL)),
+                    when(col("Sum Compute Throughput").gt(90.0))
+                        .then(lit("Compute Units"))
+                        .otherwise(lit(NULL)),
+                    when(col("Sum L2 Throughput").gt(90.0))
+                        .then(lit("L2 Cache"))
+                        .otherwise(lit(NULL)),
+                    when(col("Sum L1 Throughput").gt(90.0))
+                        .then(lit("L1 Cache"))
+                        .otherwise(lit(NULL)),
+                ])
+                .unwrap()
+                .list()
+                .eval(col("").drop_nulls())
+                .alias("Contested Resources"),
+                concat_list(
+                    sum_contested_resource_names
+                        .iter()
+                        .map(|s| col(*s))
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap()
+                .list()
+                .arg_max()
+                .alias("Max Contention Index"),
+            ])
+            .with_column(
                 sum_contested_resource_names
                     .iter()
-                    .map(|s| col(*s))
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap()
-            .list()
-            .arg_max()
-            .alias("Max Contention Index"),
-        ])
-        .with_column(
-            sum_contested_resource_names
-                .iter()
-                .enumerate()
-                .fold(
-                    when(lit(false))
-                        .then(lit(NULL))
-                        .when(lit(false))
-                        .then(lit(NULL)),
-                    |acc, (i, _label)| {
-                        acc.when(col("Max Contention Index").eq(lit(i as u32)))
-                            .then(lit(sum_contested_resource_display_names[i]))
-                    },
-                )
-                .otherwise(lit(NULL))
-                .alias("Main Bottleneck"),
-        );
-        pair_ncu_profile_rows.push(ncu_kernels_profiles.clone());
+                    .enumerate()
+                    .fold(
+                        when(lit(false))
+                            .then(lit(NULL))
+                            .when(lit(false))
+                            .then(lit(NULL)),
+                        |acc, (i, _label)| {
+                            acc.when(col("Max Contention Index").eq(lit(i as u32)))
+                                .then(lit(sum_contested_resource_display_names[i]))
+                        },
+                    )
+                    .otherwise(lit(NULL))
+                    .alias("Main Bottleneck"),
+            );
+            pair_ncu_profile_rows.push(ncu_kernels_profiles.clone());
 
-        println!(
-            "Joined pair ncu: {}",
-            ncu_kernels_profiles.clone().collect().unwrap()
-        );
+            println!(
+                "Joined pair ncu: {}",
+                ncu_kernels_profiles.clone().collect().unwrap()
+            );
+        }
 
         let kernel_names_series = Series::new("Kernel Names".into(), pair.get_kernel_names());
         let user_kernels_filtered = gpu_data
@@ -993,9 +1006,34 @@ fn main() {
         [col("Opposing Kernel")],
         JoinArgs::new(JoinType::Inner),
     );
-    let full_ncu_profiling_pairs = concat(pair_ncu_profile_rows, UnionArgs::default())
+    let [
+        mut pivoted_contested_resources,
+        mut pivoted_most_contested_resource,
+    ] = if *FULL.get().unwrap() {
+        let full_ncu_profiling_pairs = concat(pair_ncu_profile_rows, UnionArgs::default())
+            .unwrap()
+            .rename(["Kernel Name"], [CudaGpuTrace::NAME], true);
+        collect_all_array([
+            get_pivoted_table_for_attribute(
+                full_ncu_profiling_pairs
+                    .clone()
+                    .with_column(col("Contested Resources").list().join(lit(";"), true)),
+                "Contested Resources",
+                "Name",
+            ),
+            get_pivoted_table_for_attribute(
+                full_ncu_profiling_pairs.clone(),
+                "Main Bottleneck",
+                "Name",
+            ),
+        ])
         .unwrap()
-        .rename(["Kernel Name"], [CudaGpuTrace::NAME], true);
+    } else {
+        [
+            DataFrame::new(0, vec![]).unwrap(),
+            DataFrame::new(0, vec![]).unwrap(),
+        ]
+    };
     let start = std::time::Instant::now();
     let [
         mut pivoted_naive_impact_scores,
@@ -1004,8 +1042,6 @@ fn main() {
         mut final_kernel_scorings,
         mut pivoted_mean_system_latency_summary,
         mut pivoted_p99_system_latency_summary,
-        mut pivoted_contested_resources,
-        mut pivoted_most_contested_resource,
     ] = collect_all_array([
         get_pivoted_table_for_attribute(
             sensitivity_scores.clone(),
@@ -1027,18 +1063,6 @@ fn main() {
             .sort([CudaGpuTrace::NAME], SortMultipleOptions::default()),
         pivoted_mean_system_latency_summary.clone(),
         pivoted_p99_system_latency_summary.clone(),
-        get_pivoted_table_for_attribute(
-            full_ncu_profiling_pairs
-                .clone()
-                .with_column(col("Contested Resources").list().join(lit(";"), true)),
-            "Contested Resources",
-            "Name",
-        ),
-        get_pivoted_table_for_attribute(
-            full_ncu_profiling_pairs.clone(),
-            "Main Bottleneck",
-            "Name",
-        ),
     ])
     .unwrap();
     let end = std::time::Instant::now();
@@ -1052,8 +1076,10 @@ fn main() {
         "Pivoted Weighted Aggression: {}",
         pivoted_weighted_aggression_scores
     );
-    println!("Contested Resources: {}", pivoted_contested_resources);
-    println!("Main Bottlenecks: {}", pivoted_most_contested_resource);
+    if *FULL.get().unwrap() {
+        println!("Contested Resources: {}", pivoted_contested_resources);
+        println!("Main Bottlenecks: {}", pivoted_most_contested_resource);
+    }
     debug!("Pivoting took {:#?}", end - start);
 
     write_to_csv(
@@ -1086,14 +1112,16 @@ fn main() {
         &mut pivoted_p99_system_latency_summary,
     )
     .unwrap();
-    write_to_csv(
-        &global_config.new_output_file("contested_resources.csv"),
-        &mut pivoted_contested_resources,
-    )
-    .unwrap();
-    write_to_csv(
-        &global_config.new_output_file("main_bottlenecks.csv"),
-        &mut pivoted_most_contested_resource,
-    )
-    .unwrap();
+    if *FULL.get().unwrap() {
+        write_to_csv(
+            &global_config.new_output_file("contested_resources.csv"),
+            &mut pivoted_contested_resources,
+        )
+        .unwrap();
+        write_to_csv(
+            &global_config.new_output_file("main_bottlenecks.csv"),
+            &mut pivoted_most_contested_resource,
+        )
+        .unwrap();
+    }
 }
