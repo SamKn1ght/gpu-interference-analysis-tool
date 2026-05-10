@@ -23,7 +23,7 @@ kernels:
     args:
       - type: "double*"
         name: "d"
-      - type: "double*"
+      - type: "float*"
         name: "d_sum"
       - type: "int"
         name: "n"
@@ -83,7 +83,7 @@ setup:
       name: "c"
     - type: "double*"
       name: "d"
-    - type: "double*"
+    - type: "float*"
       name: "d_sum"
     - type: "double*"
       name: "e"
