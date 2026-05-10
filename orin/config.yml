@@ -1,9 +1,9 @@
 frame_budget:
-  duration: "1ms"
+  duration: "10ms"
   method: "Busy"
 kernels:
   - name: "strided_pythagorus"
-    blocks: 140
+    blocks: 32
     threads: 256
     stream: "stream1"
     args:
@@ -16,7 +16,7 @@ kernels:
       - type: "int"
         name: "n"
   - name: "strided_reduce_sum"
-    blocks: 140
+    blocks: 32
     threads: 256
     shared_memory_bytes: 2048
     stream: "stream2"
@@ -28,7 +28,7 @@ kernels:
       - type: "int"
         name: "n"
   - name: "cellular_vec_add"
-    blocks: 65535
+    blocks: 16384
     threads: 256
     stream: "stream3"
     args:
@@ -41,7 +41,7 @@ kernels:
       - type: "int"
         name: "n"
   - name: "grayscale_filter"
-    blocks: 262144
+    blocks: 16384
     threads: 256
     stream: "stream4"
     args:
@@ -54,7 +54,7 @@ kernels:
       - type: "int"
         name: "height"
   - name: "convolution_2d"
-    blocks: 65313
+    blocks: 4041
     threads: 256
     stream: "stream5"
     args:
@@ -73,7 +73,7 @@ kernels:
       - type: "int"
         name: "kernel_height"
   - name: "sdf_cuda_kernel"
-    blocks: 8192
+    blocks: 512
     threads: 256
     stream: "stream6"
     args:
